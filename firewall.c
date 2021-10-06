@@ -58,15 +58,13 @@ int setup_memory(int port_id) {
     if(ext_mem.buf_ptr != buf_ptr_dev)
         rte_exit(EXIT_FAILURE, "could not create external memory\next_mem.buf_ptr!=buf_ptr_dev\n");
 
-    int r=rte_dev_dma_map(rte_eth_devices[port_id].device, ext_mem.buf_ptr, ext_mem.buf_iova, ext_mem.buf_len);
-    if(r)
-        rte_exit(EXIT_FAILURE, "Error: could not map external memory for DMA\n");
+    rte_dev_dma_map(rte_eth_devices[port_id].device, ext_mem.buf_ptr, ext_mem.buf_iova, ext_mem.buf_len);
 
     mpool_payload=rte_pktmbuf_pool_create_extbuf("payload_mpool", DEFAULT_NB_MBUF,
                   0, 0, ext_mem.elt_size,
                   rte_socket_id(), &ext_mem, 1);
-    
-	if(!mpool_payload)
+
+    if(!mpool_payload)
         rte_exit(EXIT_FAILURE, "Error: could not create mempool from external memory\n");
 
     return 0;
@@ -79,18 +77,27 @@ int setup_port(int port_id) {
         .rxmode = {
             .max_rx_pkt_len = RTE_ETHER_MAX_LEN,
         },
+        .txmode = {
+            .mq_mode=ETH_MQ_TX_NONE,
+        },
     };
 
     int r;
 
     struct rte_eth_dev_info dev_info;
-    rte_eth_dev_info_get(0, &dev_info);
-    printf("using device 0 with driver \"%s\"\n", dev_info.driver_name);
+    rte_eth_dev_info_get(port_id, &dev_info);
+    printf("using device %d with driver \"%s\"\n", port_id, dev_info.driver_name);
 
     if(dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
         port_conf.txmode.offloads |= DEV_TX_OFFLOAD_MBUF_FAST_FREE;
 
-    CHECK_R((r=rte_eth_dev_configure(0, 1, 1, &port_conf))!=0);
+    port_conf.rx_adv_conf.rss_conf.rss_hf&=dev_info.flow_type_rss_offloads;
+
+    struct rte_flow_error flow_error;
+    if(rte_flow_flush(port_id, &flow_error))
+        rte_exit(EXIT_FAILURE, "Error: could not flush flow rules: %s\n", flow_error.message);
+
+    CHECK_R((r=rte_eth_dev_configure(port_id, 1, 1, &port_conf))!=0);
 
     struct rte_eth_txconf txconf=dev_info.default_txconf;
     txconf.offloads=port_conf.txmode.offloads;
@@ -98,36 +105,36 @@ int setup_port(int port_id) {
     CHECK_R((r=rte_eth_tx_queue_setup(port_id, 0, DEFAULT_NB_TX_DESC, rte_eth_dev_socket_id(0), &txconf))<0);
 
     CHECK_R((r=rte_eth_rx_queue_setup(port_id, 0, DEFAULT_NB_RX_DESC, rte_eth_dev_socket_id(0), NULL, mpool_payload))<0);
-    
-	CHECK_R((r=rte_eth_dev_start(port_id))<0);
+
+    CHECK_R((r=rte_eth_dev_start(port_id))<0);
 
     CHECK_R((r=rte_eth_promiscuous_enable(port_id))!=0);
     return 0;
 }
 #undef CHECK_R
 
-static __rte_noreturn void firewall(void *table) {
+static __rte_noreturn void firewall(void *table, uint8_t *rule_actions) {
     volatile uint64_t *lookup_hit_mask, *lookup_hit_mask_d, pkts_mask;
     volatile uint32_t *vals, *vals_d;
-	cudaHostAlloc((void **) &vals, sizeof(uint32_t)*BURST_SIZE, cudaHostAllocMapped);
-	cudaHostGetDevicePointer((void **) &vals_d, (uint32_t *) vals, 0);
+    cudaHostAlloc((void **) &vals, sizeof(uint32_t)*BURST_SIZE, cudaHostAllocMapped);
+    cudaHostGetDevicePointer((void **) &vals_d, (uint32_t *) vals, 0);
 
-	cudaHostAlloc((void **) &lookup_hit_mask, sizeof(uint64_t), cudaHostAllocMapped);
-	cudaHostGetDevicePointer((void **) &lookup_hit_mask_d, (uint64_t *) lookup_hit_mask, 0);
+    cudaHostAlloc((void **) &lookup_hit_mask, sizeof(uint64_t), cudaHostAllocMapped);
+    cudaHostGetDevicePointer((void **) &lookup_hit_mask_d, (uint64_t *) lookup_hit_mask, 0);
 
-	struct rte_mbuf **bufs_rx;
-	struct rte_mbuf **bufs_rx_d;
-	cudaHostAlloc((void **) &bufs_rx, sizeof(struct rte_mbuf*)*BURST_SIZE, cudaHostAllocMapped);
-	cudaHostGetDevicePointer((void **) &bufs_rx_d, bufs_rx, 0);
+    struct rte_mbuf **bufs_rx;
+    struct rte_mbuf **bufs_rx_d;
+    cudaHostAlloc((void **) &bufs_rx, sizeof(struct rte_mbuf*)*BURST_SIZE, cudaHostAllocMapped);
+    cudaHostGetDevicePointer((void **) &bufs_rx_d, bufs_rx, 0);
 
-	struct rte_mbuf *bufs_tx[BURST_SIZE];
+    struct rte_mbuf *bufs_tx[BURST_SIZE];
 
     const int (*lookup) (void *, struct rte_mbuf **, uint64_t, uint64_t *, void **)=rte_table_bv_ops.f_lookup;
 
     int16_t i,j;
-	
-	*lookup_hit_mask=0;
-    for(;;*lookup_hit_mask=0) {
+
+    *lookup_hit_mask=0;
+    for(;; *lookup_hit_mask=0) {
         const uint16_t nb_rx = rte_eth_rx_burst(0, 0, bufs_rx, BURST_SIZE);
 
         if(unlikely(nb_rx==0))
@@ -136,13 +143,19 @@ static __rte_noreturn void firewall(void *table) {
         pkts_mask=(1<<nb_rx)-1;
 
         lookup(table, bufs_rx_d, pkts_mask, (uint64_t *) lookup_hit_mask_d, (void **) vals_d);
-		printf("lookup_hit_mask: %016X\n", *lookup_hit_mask);
+        printf("lookup_hit_mask: %016X\n", *lookup_hit_mask);
 
-        for(i=0,j=0; i<nb_rx; ++i)
-            if((*lookup_hit_mask>>i)&1&(vals[i]>127))
+        i=0;
+        j=0;
+        for(; i<nb_rx; ++i) {
+            if((*lookup_hit_mask>>i)&1&(rule_actions[vals[i]]==RULE_ACCEPT)) {
+                printf("sending %uth packet...\n", i);
                 bufs_tx[j++]=bufs_rx[i];
+            }
+        }
 
         const uint16_t nb_tx = rte_eth_tx_burst(0, 0, bufs_tx, j);
+        printf("nb_tx: %u nb_rx: %u\n", nb_tx, nb_rx);
         if(unlikely(nb_tx<nb_rx)) {
             for(uint16_t b=nb_tx; b<nb_rx; ++b)
                 rte_pktmbuf_free(bufs_rx[b]);
@@ -158,6 +171,7 @@ int main(int ac, char *as[]) {
     }
 
     int offset;
+    uint8_t *rule_actions=NULL;
 
     if((offset=rte_eal_init(ac, as))<0)
         rte_exit(EXIT_FAILURE, "Error: could not init EAL.\n");
@@ -173,9 +187,15 @@ int main(int ac, char *as[]) {
     if(rte_eth_dev_count_avail()==0)
         rte_exit(EXIT_FAILURE, "Error: no eth devices available.\n");
 
-    setup_memory(0);
-    setup_port(0);
+    if(setup_memory(0)) {
+        rte_eal_cleanup();
+        return EXIT_FAILURE;
+    }
 
+    if(setup_port(0)) {
+        rte_eal_cleanup();
+        return EXIT_FAILURE;
+    }
 
     ruleset_t ruleset;
     memset(&ruleset, 0, sizeof(ruleset_t));
@@ -186,10 +206,16 @@ int main(int ac, char *as[]) {
         return EXIT_FAILURE;
     }
 
+    rule_actions=malloc(sizeof(uint8_t)*ruleset.num_rules+1);
+    for(size_t i=0; i<ruleset.num_rules; ++i)
+        rule_actions[i+1]=ruleset.rules[i]->val;
+
+    printf("parsed ruleset \"%s\" with %lu rules\n", as[0], ruleset.num_rules);
+
     struct rte_table_bv_field_def fdefs[5];
-    uint32_t fdefs_offsets[5]= {	offsetof(struct rte_ipv4_hdr, src_addr), offsetof(struct rte_ipv4_hdr, dst_addr),  
-									sizeof(struct rte_ipv4_hdr)+offsetof(struct rte_tcp_hdr, src_port), 
-									sizeof(struct rte_ipv4_hdr)+offsetof(struct rte_tcp_hdr, dst_port), offsetof(struct rte_ipv4_hdr, next_proto_id)
+    uint32_t fdefs_offsets[5]= {	offsetof(struct rte_ipv4_hdr, src_addr), offsetof(struct rte_ipv4_hdr, dst_addr),
+                                    sizeof(struct rte_ipv4_hdr)+offsetof(struct rte_tcp_hdr, src_port),
+                                    sizeof(struct rte_ipv4_hdr)+offsetof(struct rte_tcp_hdr, dst_port), offsetof(struct rte_ipv4_hdr, next_proto_id)
                                },
                                fdefs_sizes[5]= {4,4,2,2,1};
 
@@ -207,17 +233,19 @@ int main(int ac, char *as[]) {
         goto err;
 
     rte_table_bv_ops.f_add_bulk(table, (void **) ruleset.rules, NULL, ruleset.num_rules, NULL, NULL);
-	free_ruleset(&ruleset);
-    
-	firewall(table);
+
+    free_ruleset(&ruleset);
+
+    firewall(table, rule_actions);
 
     rte_table_bv_ops.f_free(table);
 
+    free(rule_actions);
     rte_eal_cleanup();
     return EXIT_SUCCESS;
 
 err:
-
+    free(rule_actions);
     rte_eal_cleanup();
     return EXIT_FAILURE;
 }

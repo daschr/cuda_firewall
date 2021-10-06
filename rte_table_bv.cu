@@ -298,7 +298,6 @@ __global__ void bv_search(	uint32_t **ranges, uint64_t *num_ranges, uint32_t *of
     for(long i=se[1]>>1; se[0]<=se[1]; i=(se[0]+se[1])>>1) {
         l=v>=range_dim[i<<1];
         r=v<=range_dim[(i<<1)+1];
-
         if(l&r) {
             bv[threadIdx.x]=bvs[threadIdx.x]+i*RTE_TABLE_BV_BS;
             break;
@@ -320,7 +319,7 @@ __global__ void bv_search(	uint32_t **ranges, uint64_t *num_ranges, uint32_t *of
 
             if((pos=__ffs(x))!=0) {
                 vals[blockIdx.x]=(i<<5)+pos;
-                atomicOr((unsigned long long *)lookup_hit_mask, 1<<blockIdx.x);
+				atomicOr((unsigned long long *)lookup_hit_mask, 1<<blockIdx.x);
                 break;
             }
         }
