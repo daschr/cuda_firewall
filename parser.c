@@ -30,6 +30,11 @@ bool parse_ruleset(ruleset_t *ruleset, const char *file) {
             goto failure;
         }
 
+		if((ruleset->actions=malloc(sizeof(uint8_t)*INITIAL_BUFSIZE))==NULL){
+				fprintf(stderr, "ERROR: could not allocate memory for actions!\n");
+				goto failure;
+		}
+
         for(size_t i=0; i<INITIAL_BUFSIZE; ++i) {
             if((ruleset->rules[i]=malloc(sizeof(struct rte_table_bv_key)))==NULL) {
                 fprintf(stderr, "ERROR: could not allocate memory for %luth rule!\n", i);
@@ -73,9 +78,9 @@ bool parse_ruleset(ruleset_t *ruleset, const char *file) {
             }
 			
             if(strcmp(command, "DROP")==0) {
-                ruleset->rules[ruleset->num_rules]->val=RULE_DROP;
+                ruleset->actions[ruleset->num_rules]=RULE_DROP;
             } else if(strcmp(command, "ACCEPT")==0) {
-                ruleset->rules[ruleset->num_rules]->val=RULE_ACCEPT;
+                ruleset->actions[ruleset->num_rules]=RULE_ACCEPT;
             } else {
                 fprintf(stderr, "ERROR: could not parse command \"%d\"\n", command);
                 goto failure;
@@ -86,7 +91,12 @@ bool parse_ruleset(ruleset_t *ruleset, const char *file) {
             if(++(ruleset->num_rules)==ruleset->rules_size) {
                 ruleset->rules_size<<=1;
                 if((ruleset->rules=realloc(ruleset->rules, sizeof(struct rte_table_bv_key *)*ruleset->rules_size))==NULL) {
-                    fprintf(stderr, "ERROR: could not realloc!\n");
+                    fprintf(stderr, "ERROR: could not realloc memory for rules!\n");
+                    goto failure;
+                }
+
+				if((ruleset->actions=realloc(ruleset->actions, sizeof(uint8_t)*ruleset->rules_size))==NULL) {
+                    fprintf(stderr, "ERROR: could not realloc memory for actions!\n");
                     goto failure;
                 }
 
@@ -119,12 +129,42 @@ failure:
         }
 
         free(ruleset->rules);
-    }
+		free(ruleset->actions);
+	}
 
     ruleset->rules=NULL;
+	ruleset->actions=NULL;
 
     fclose(fd);
     return false;
+}
+
+void free_ruleset(ruleset_t *ruleset) {
+    if(ruleset->rules) {
+        for(size_t i=0; i<ruleset->rules_size; ++i) {
+            free(ruleset->rules[i]->buf);
+            free(ruleset->rules[i]);
+        }
+
+        free(ruleset->rules);
+    	free(ruleset->actions);
+	}
+
+   	ruleset->rules=NULL;
+	ruleset->actions=NULL;
+}
+
+void free_ruleset_except_actions(ruleset_t *ruleset) {
+    if(ruleset->rules) {
+        for(size_t i=0; i<ruleset->rules_size; ++i) {
+            free(ruleset->rules[i]->buf);
+            free(ruleset->rules[i]);
+        }
+
+        free(ruleset->rules);
+	}
+
+   	ruleset->rules=NULL;
 }
 
 static int parse_range(const char *s, uint32_t *out) {
@@ -145,15 +185,4 @@ static int parse_range(const char *s, uint32_t *out) {
     }
 
     return 1;
-}
-
-void free_ruleset(ruleset_t *ruleset) {
-    if(ruleset->rules) {
-        for(size_t i=0; i<ruleset->rules_size; ++i) {
-            free(ruleset->rules[i]->buf);
-            free(ruleset->rules[i]);
-        }
-
-        free(ruleset->rules);
-    }
 }

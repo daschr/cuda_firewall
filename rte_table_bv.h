@@ -39,7 +39,6 @@ struct rte_table_bv_params {
 struct rte_table_bv_key {
 	uint32_t *buf; // size = sum(rte_table_bv_params[*].num_fields*2)
 	uint32_t pos;
-	uint8_t val;
 };
 
 extern struct rte_table_ops rte_table_bv_ops;

@@ -159,7 +159,7 @@ static inline void cal_from_to(uint32_t *from_to, uint32_t *v, uint8_t type, uin
 static int rte_table_bv_entry_add(void *t_r, void *k_r, void *e_r, int *key_found, void **e_ptr) {
     struct rte_table_bv *t=(struct rte_table_bv *) t_r;
     struct rte_table_bv_key *k=(struct rte_table_bv_key *) k_r;
-    uint32_t *val=(uint32_t *) e_r;
+    uint32_t *pos=(uint32_t *) e_r;
     *key_found=0;
 
     uint32_t from_to[2];
@@ -168,7 +168,7 @@ static int rte_table_bv_entry_add(void *t_r, void *k_r, void *e_r, int *key_foun
 
     for(uint32_t f=0; f<t->num_fields; ++f) {
         cal_from_to(from_to, k->buf +(f<<1), t->field_defs[f].type, t->field_defs[f].size);
-        rte_bv_markers_range_add(t->bv_markers+f, from_to, *val);
+        rte_bv_markers_range_add(t->bv_markers+f, from_to, *pos);
 
         memset(&ranges, 0, sizeof(rte_bv_ranges_t));
         ranges.bv_bs=RTE_TABLE_BV_BS;
@@ -194,7 +194,7 @@ static int rte_table_bv_entry_delete(void  *t_r, void *k_r, int *key_found, void
 
     for(uint32_t f=0; f<t->num_fields; ++f) {
         cal_from_to(from_to, k->buf+(f<<1), t->field_defs[f].type, t->field_defs[f].size);
-        rte_bv_markers_range_del(t->bv_markers+f, from_to, k->val);
+        rte_bv_markers_range_del(t->bv_markers+f, from_to, k->pos);
 
         memset(&ranges, 0, sizeof(rte_bv_ranges_t));
         ranges.bv_bs=RTE_TABLE_BV_BS;
@@ -264,7 +264,7 @@ static int rte_table_bv_entry_delete_bulk(void  *t_r, void **ks_r, uint32_t n_ke
 __global__ void bv_search(	uint32_t **ranges, uint64_t *num_ranges, uint32_t *offsets, uint8_t *sizes,
                             uint32_t **bvs, uint32_t bv_bs,
                             ulong pkts_mask, uint8_t **pkts,
-                            volatile uint *__restrict__ vals, volatile ulong *lookup_hit_mask) {
+                            volatile uint *__restrict__ positions, volatile ulong *lookup_hit_mask) {
 
     if(!((pkts_mask>>blockIdx.x)&1))
         return;
@@ -276,14 +276,11 @@ __global__ void bv_search(	uint32_t **ranges, uint64_t *num_ranges, uint32_t *of
     switch(sizes[threadIdx.x]) {
     case 1:
         v=*pkt;
-        printf("[%d|%d] 8bit: %u\n", blockIdx.x, threadIdx.x, v);
         break;
     case 2:
         v=pkt[1]+(pkt[0]<<8);
-        printf("[%d|%d] 16bit: %u\n", blockIdx.x, threadIdx.x, v);
         break;
     case 4:
-        printf("[%d|%d] IP: %u.%u.%u.%u\n", blockIdx.x, threadIdx.x, pkt[0], pkt[1], pkt[2], pkt[3]);
         v=pkt[3]+(pkt[2]<<8)+(pkt[1]<<16)+(pkt[0]<<24);
         break;
     default:
@@ -318,7 +315,7 @@ __global__ void bv_search(	uint32_t **ranges, uint64_t *num_ranges, uint32_t *of
                 x&=bv[b][i];
 
             if((pos=__ffs(x))!=0) {
-                vals[blockIdx.x]=(i<<5)+pos;
+                positions[blockIdx.x]=(i<<5)+pos-1;
 				atomicOr((unsigned long long *)lookup_hit_mask, 1<<blockIdx.x);
                 break;
             }
@@ -331,7 +328,7 @@ end:
 static int rte_table_bv_lookup(void *t_r, struct rte_mbuf **pkts, uint64_t pkts_mask, uint64_t *lookup_hit_mask, void **e) {
     struct rte_table_bv *t=(struct rte_table_bv *) t_r;
 
-    uint32_t n_pkts_in=__builtin_popcountll(pkts_mask);
+    const uint32_t n_pkts_in=__builtin_popcountll(pkts_mask);
     RTE_TABLE_BV_STATS_PKTS_IN_ADD(t, n_pkts_in);
 
     for(uint32_t i=0; i<n_pkts_in; ++i)
@@ -346,11 +343,12 @@ static int rte_table_bv_lookup(void *t_r, struct rte_mbuf **pkts, uint64_t pkts_
     cudaStreamSynchronize(0);
 
     RTE_TABLE_BV_STATS_PKTS_LOOKUP_MISS(t, n_pkts_in-__builtin_popcountll(*lookup_hit_mask));
-
+/*
     cudaError_t err = cudaGetLastError();
     if(err!=cudaSuccess)
         printf("[bv_search] error: %s\n", cudaGetErrorString(err));
-    return 0;
+*/
+  	return 0;
 }
 
 static int rte_table_bv_stats_read(void *t_r, struct rte_table_stats *stats, int clear) {

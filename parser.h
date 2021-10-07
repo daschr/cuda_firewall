@@ -17,8 +17,10 @@ typedef struct {
     size_t num_rules;
     size_t rules_size;
     struct rte_table_bv_key **rules;
+	uint8_t *actions; 
 } ruleset_t;
 
 bool parse_ruleset(ruleset_t *ruleset, const char *file);
-void free_ruleset(ruleset_t *rules);
+void free_ruleset(ruleset_t *ruleset);
+void free_ruleset_except_actions(ruleset_t *ruleset);
 #endif
