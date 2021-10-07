@@ -6,6 +6,8 @@ Implementing a Firewall using dpdk and CUDA
 - [x] simple 5 tuple rule syntax with DROP/ACCEPT actions
 - [x] l2 polling on trunk port and l2 forward to correspondending tap iface, if lookup successfully highest priority rule has ACCEPT action
 - [x] simple l2 forward of incoming packet from tap to trunk port
+- [ ] switch from tap to kni
+- [ ] add better stats collection to firewall
 - [ ] improving speed of bitvector search
 - [ ] misc. refactoring
 
