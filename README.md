@@ -22,8 +22,9 @@ Implementing a Firewall using dpdk and CUDA
 # usage
 
 * build dpdk (>=21.08)
+* `make all`
 * run:
- 1. `sudo ./firewall -l0-1 --vdev=net_tap0,iface=fw0  rules.txt`
- 2. `ip a add <some ip 1> dev fw0`
- 3. on second host: `ip a add <some ip 2> <some connected iface>`
- 4. now test 
+   1. `sudo ./firewall -l0-1 --vdev=net_tap0,iface=fw0  rules.txt`
+   2. `ip a add <some ip 1> dev fw0`
+   3. on second host: `ip a add <some ip 2> <some connected iface>`
+   4. now test 
