@@ -15,7 +15,7 @@ Implementing a Firewall using dpdk and CUDA
 
 | line rate | 100Mbits/s | 500 Mbits/s | 1Gbit/s | 5 Gbit/s | 10 Gbit/s | 20 Gbit/s | 40 Gbit/s|
 |-----------|:----------:|:-----------:|:-------:|:--------:|:---------:|:---------:|:--------:|
-||**reached**|**reached**|**reached**|*pending*|*pending*|*pending*|*pending*|
+||**reached**|**reached**|**reached**|**reached**|*pending*|*pending*|*pending*|
 
  <font size="1"> *tested using iperf3 and two Mellanox ConnectX-3 NICs (40GigE)</font> 
 
