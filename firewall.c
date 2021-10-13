@@ -62,7 +62,7 @@ void exit_handler(int e) {
     exit(EXIT_SUCCESS);
 }
 
-static __rte_noreturn void firewall(void *table, uint8_t *actions) {
+static __rte_noreturn void firewall(void *table, uint8_t *actions, struct rte_ether_addr *tap_macaddr) {
     volatile uint64_t *lookup_hit_mask, *lookup_hit_mask_d, pkts_mask;
     volatile uint32_t *positions, *positions_d;
 
@@ -96,9 +96,13 @@ static __rte_noreturn void firewall(void *table, uint8_t *actions) {
 
         i=0;
         j=0;
+
         for(; i<nb_rx; ++i) {
-            if((*lookup_hit_mask>>i)&1&(actions[positions[i]]==RULE_ACCEPT))
+            if(!(  (*lookup_hit_mask>>i)&1  &  (actions[positions[i]]==RULE_DROP) )) {
                 bufs_tx[j++]=bufs_rx[i];
+                if(tap_macaddr!=NULL)
+                    rte_memcpy(&(rte_pktmbuf_mtod(bufs_rx[i], struct rte_ether_hdr *)->d_addr), tap_macaddr, 6);
+            }
         }
 
         const uint16_t nb_tx = rte_eth_tx_burst(tap_port_id, 0, bufs_tx, j);
@@ -173,12 +177,15 @@ int main(int ac, char *as[]) {
     as=as+offset;
 
     uint16_t avail_eths;
+    struct rte_ether_addr tap_macaddr;
 
     if((avail_eths=rte_eth_dev_count_avail())<2)
         rte_exit(EXIT_FAILURE, "Error: not enough devices available.\n");
 
     if(find_tap_trunk_devs(&tap_port_id, &trunk_port_id))
         rte_exit(EXIT_FAILURE, "Error: could not find a tap/trunk port.\n");
+
+    rte_eth_macaddr_get(tap_port_id, &tap_macaddr);
 
     if(setup_memory(&ext_mem, &mpool_payload)) {
         rte_eal_cleanup();
@@ -201,15 +208,27 @@ int main(int ac, char *as[]) {
     printf("parsed ruleset \"%s\" with %lu rules\n", as[0], ruleset.num_rules);
 
     struct rte_table_bv_field_def fdefs[5];
-    uint32_t fdefs_offsets[5]= {	offsetof(struct rte_ipv4_hdr, src_addr), offsetof(struct rte_ipv4_hdr, dst_addr),
+    uint32_t fdefs_offsets[5]= {	offsetof(struct rte_ipv4_hdr, src_addr),
+                                    offsetof(struct rte_ipv4_hdr, dst_addr),
                                     sizeof(struct rte_ipv4_hdr)+offsetof(struct rte_tcp_hdr, src_port),
-                                    sizeof(struct rte_ipv4_hdr)+offsetof(struct rte_tcp_hdr, dst_port), offsetof(struct rte_ipv4_hdr, next_proto_id)
+                                    sizeof(struct rte_ipv4_hdr)+offsetof(struct rte_tcp_hdr, dst_port),
+                                    offsetof(struct rte_ipv4_hdr, next_proto_id)
                                },
-                               fdefs_sizes[5]= {4,4,2,2,1};
+                               fdefs_sizes[5]= {4,4,2,2,1},
+    ptype_masks[5] = {
+        RTE_PTYPE_L2_MASK|RTE_PTYPE_L3_IPV4|RTE_PTYPE_L4_MASK,
+        RTE_PTYPE_L2_MASK|RTE_PTYPE_L3_IPV4|RTE_PTYPE_L4_MASK,
+        RTE_PTYPE_L2_MASK|RTE_PTYPE_L3_IPV4|RTE_PTYPE_L4_TCP|RTE_PTYPE_L4_UDP,
+        RTE_PTYPE_L2_MASK|RTE_PTYPE_L3_IPV4|RTE_PTYPE_L4_TCP|RTE_PTYPE_L4_UDP,
+        RTE_PTYPE_L2_ETHER|RTE_PTYPE_L3_MASK|RTE_PTYPE_L4_MASK
+    };
+
+
 
     for(size_t i=0; i<5; ++i) {
         fdefs[i].offset=sizeof(struct rte_ether_hdr) + fdefs_offsets[i];
         fdefs[i].type=RTE_TABLE_BV_FIELD_TYPE_RANGE;
+        fdefs[i].ptype_mask=ptype_masks[i];
         fdefs[i].size=fdefs_sizes[i];
     }
 
@@ -227,7 +246,7 @@ int main(int ac, char *as[]) {
     rte_eal_wait_lcore(1);
     rte_eal_remote_launch(tap_tx, NULL, 1);
 
-    firewall(table, ruleset.actions);
+    firewall(table, ruleset.actions, &tap_macaddr);
 
     rte_table_bv_ops.f_free(table);
 

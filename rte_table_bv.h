@@ -12,6 +12,7 @@ extern "C" {
 
 #define RTE_TABLE_BV_MAX_RANGES RTE_BV_MARKERS_MAX_ENTRIES>>1
 #define RTE_TABLE_BV_BS	(RTE_TABLE_BV_MAX_RANGES>>5)
+#define RTE_TABLE_BV_MAX_PKTS 64
 
 enum {
 	RTE_TABLE_BV_FIELD_TYPE_RANGE,
@@ -20,6 +21,7 @@ enum {
 
 struct rte_table_bv_field_def {
 	uint32_t offset; // offset from data start
+	uint32_t ptype_mask; // packet type mask needed for matching
 	
 	uint8_t type;
 	uint8_t size; // in bytes
