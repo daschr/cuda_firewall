@@ -7,6 +7,7 @@ extern "C" {
 
 #include "rte_bv.h"
 #include <rte_log.h>
+#include <rte_malloc.h>
 #include <stdlib.h>
 
 #ifdef RTE_TABLE_STATS_COLLECT
@@ -77,8 +78,11 @@ static int rte_table_bv_free(void *t_r) {
     for(uint32_t i=0; i<t->num_fields; ++i)
         rte_bv_markers_free(t->bv_markers+i);
 
-    free(t->bv_markers);
-    free(t);
+    rte_free(t->bv_markers);
+    rte_free(t->ranges_db);
+    rte_free(t->bvs_db);
+
+    rte_free(t);
 
     return 0;
 }
@@ -87,14 +91,14 @@ static int rte_table_bv_free(void *t_r) {
 
 static void *rte_table_bv_create(void *params, int socket_id, uint32_t entry_size) {
     struct rte_table_bv_params *p=(struct rte_table_bv_params *) params;
-    struct rte_table_bv *t=(struct rte_table_bv *) malloc(sizeof(struct rte_table_bv));
+    struct rte_table_bv *t=(struct rte_table_bv *) rte_malloc("t", sizeof(struct rte_table_bv), 0);
     memset(t, 0, sizeof(struct rte_table_bv));
 
     t->num_fields=p->num_fields;
     t->field_defs=p->field_defs;
 
-    t->ranges_db=(uint32_t **) malloc(sizeof(uint32_t *)*(t->num_fields<<1));
-    t->bvs_db=(uint32_t **) malloc(sizeof(uint32_t *)*(t->num_fields<<1));
+    t->ranges_db=(uint32_t **) rte_malloc("ranges_db", sizeof(uint32_t *)*(t->num_fields<<1), 0);
+    t->bvs_db=(uint32_t **) rte_malloc("bvs_db", sizeof(uint32_t *)*(t->num_fields<<1), 0);
 #define CHECK(X) if(IS_ERROR(X)) return NULL
     CHECK(cudaHostAlloc((void **) &t->act_buf_h, sizeof(uint8_t), cudaHostAllocMapped));
     CHECK(cudaHostGetDevicePointer((void **) &t->act_buf, t->act_buf_h, 0));
@@ -127,7 +131,7 @@ static void *rte_table_bv_create(void *params, int socket_id, uint32_t entry_siz
     CHECK(cudaMemcpy(t->bvs_db_dev, t->bvs_db, sizeof(uint32_t *)*t->num_fields*2, cudaMemcpyHostToDevice));
 #undef CHECK
 
-    t->bv_markers=(rte_bv_markers_t *) malloc(sizeof(rte_bv_markers_t)*t->num_fields);
+    t->bv_markers=(rte_bv_markers_t *) rte_malloc("bv_markers", sizeof(rte_bv_markers_t)*t->num_fields, 0);
 
     for(size_t i=0; i<t->num_fields; ++i) {
         if(rte_bv_markers_create(&t->bv_markers[i])) {
@@ -285,13 +289,13 @@ __global__ void bv_search(	uint32_t **ranges, uint64_t *num_ranges, uint32_t *of
     uint v=0;
 
     field_found[threadIdx.x]=false;
-	
-	const uint32_t ptype_a=pkts_type[blockIdx.x]&ptype_mask[threadIdx.x];
-	const bool ptype_matches=  (ptype_a&RTE_PTYPE_L2_MASK)!=0
-							 & (ptype_a&RTE_PTYPE_L3_MASK)!=0
-							 & (ptype_a&RTE_PTYPE_L4_MASK)!=0;
-	
-	if(ptype_matches) {
+
+    const uint32_t ptype_a=pkts_type[blockIdx.x]&ptype_mask[threadIdx.x];
+    const bool ptype_matches=  (ptype_a&RTE_PTYPE_L2_MASK)!=0
+                               & (ptype_a&RTE_PTYPE_L3_MASK)!=0
+                               & (ptype_a&RTE_PTYPE_L4_MASK)!=0;
+
+    if(ptype_matches) {
         pkt=pkts[blockIdx.x]+offsets[threadIdx.x];
 
         switch(sizes[threadIdx.x]) {
@@ -324,7 +328,7 @@ __global__ void bv_search(	uint32_t **ranges, uint64_t *num_ranges, uint32_t *of
 
             se[!l]=!l?i-1:i+1;
         }
-    } 
+    }
 
     __syncthreads();
     if(!threadIdx.x) {
