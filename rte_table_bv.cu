@@ -103,10 +103,10 @@ static void *rte_table_bv_create(void *params, int socket_id, uint32_t entry_siz
     CHECK(cudaHostAlloc((void **) &t->act_buf_h, sizeof(uint8_t), cudaHostAllocMapped));
     CHECK(cudaHostGetDevicePointer((void **) &t->act_buf, t->act_buf_h, 0));
 
-    CHECK(cudaHostAlloc((void **) &t->pkts_data_h, sizeof(uint8_t*)*RTE_TABLE_BV_MAX_PKTS, cudaHostAllocMapped));
+    CHECK(cudaHostAlloc((void **) &t->pkts_data_h, sizeof(uint8_t*)*RTE_TABLE_BV_MAX_PKTS, cudaHostAllocMapped|cudaHostAllocWriteCombined));
     CHECK(cudaHostGetDevicePointer((void **) &t->pkts_data, t->pkts_data_h, 0));
 
-    CHECK(cudaHostAlloc((void **) &t->packet_types_h, sizeof(uint32_t)*RTE_TABLE_BV_MAX_PKTS, cudaHostAllocMapped));
+    CHECK(cudaHostAlloc((void **) &t->packet_types_h, sizeof(uint32_t)*RTE_TABLE_BV_MAX_PKTS, cudaHostAllocMapped|cudaHostAllocWriteCombined));
     CHECK(cudaHostGetDevicePointer((void **) &t->packet_types, t->packet_types_h, 0));
 
     CHECK(cudaMalloc((void **) &t->ranges_db_dev, sizeof(uint32_t *)*t->num_fields*2));
@@ -332,14 +332,14 @@ __global__ void bv_search(	uint32_t **ranges, uint64_t *num_ranges, uint32_t *of
 
     __syncthreads();
     if(!threadIdx.x) {
-        for(uint i=0; i<blockDim.x; ++i)
-            if(!field_found[i])
-                goto end;
         uint x, pos;
         for(uint i=0; i<bv_bs; ++i) {
             x=0xffffffff;
-            for(uint b=0; b<blockDim.x; ++b)
+            for(uint b=0; b<blockDim.x; ++b){
+				if(!field_found[b])
+					goto end;
                 x&=bv[b][i];
+			}
 
             if((pos=__ffs(x))!=0) {
                 positions[blockIdx.x]=(i<<5)+pos-1;
