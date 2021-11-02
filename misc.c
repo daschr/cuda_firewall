@@ -66,7 +66,7 @@ int setup_memory(struct rte_pktmbuf_extmem *ext_mem, struct rte_mempool **mpool_
 int setup_port(uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte_mempool *mpool_payload) {
     struct rte_eth_conf port_conf = {
         .rxmode = {
-            .max_rx_pkt_len = RTE_ETHER_MAX_LEN,
+            .mtu = DEFAULT_MTU,
         },
         .txmode = {
             .mq_mode=ETH_MQ_TX_NONE,
@@ -97,7 +97,7 @@ int setup_port(uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte_
 
     CHECK_R((r=rte_eth_rx_queue_setup(port_id, 0, DEFAULT_NB_RX_DESC, rte_eth_dev_socket_id(0), NULL, mpool_payload))<0);
 
-    rte_dev_dma_map(rte_eth_devices[port_id].device, ext_mem->buf_ptr, ext_mem->buf_iova, ext_mem->buf_len);
+    rte_dev_dma_map(dev_info.device, ext_mem->buf_ptr, ext_mem->buf_iova, ext_mem->buf_len);
     
 	CHECK_R((r=rte_eth_dev_start(port_id))<0);
 

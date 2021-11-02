@@ -101,7 +101,7 @@ static __rte_noreturn void firewall(void *table, uint8_t *actions, struct rte_et
             if(!(  (*lookup_hit_mask>>i)&1  &  (actions[positions[i]]==RULE_DROP) )) {
                 bufs_tx[j++]=bufs_rx[i];
                 if(tap_macaddr!=NULL)
-                    rte_memcpy(&(rte_pktmbuf_mtod(bufs_rx[i], struct rte_ether_hdr *)->d_addr), tap_macaddr, 6);
+                    rte_memcpy(&(rte_pktmbuf_mtod(bufs_rx[i], struct rte_ether_hdr *)->dst_addr), tap_macaddr, 6);
             }
         }
 
@@ -222,8 +222,6 @@ int main(int ac, char *as[]) {
         RTE_PTYPE_L2_MASK|RTE_PTYPE_L3_IPV4|RTE_PTYPE_L4_TCP|RTE_PTYPE_L4_UDP,
         RTE_PTYPE_L2_ETHER|RTE_PTYPE_L3_MASK|RTE_PTYPE_L4_MASK
     };
-
-
 
     for(size_t i=0; i<5; ++i) {
         fdefs[i].offset=sizeof(struct rte_ether_hdr) + fdefs_offsets[i];

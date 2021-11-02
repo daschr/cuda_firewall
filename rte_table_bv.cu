@@ -275,10 +275,10 @@ static int rte_table_bv_entry_delete_bulk(void  *t_r, void **ks_r, uint32_t n_ke
     return 0;
 }
 
-__global__ void bv_search(	uint32_t **ranges, uint64_t *num_ranges, uint32_t *offsets, uint8_t *sizes,
-                            uint32_t *ptype_mask, uint32_t **bvs, uint32_t bv_bs,
-                            ulong pkts_mask, uint8_t **pkts, uint32_t *pkts_type,
-                            volatile uint *__restrict__ positions, volatile ulong *lookup_hit_mask) {
+__global__ void bv_search(	 uint32_t **ranges,  uint64_t *num_ranges,  uint32_t *offsets,  uint8_t *sizes,
+                             uint32_t *ptype_mask,  uint32_t **bvs, const uint32_t bv_bs,
+                             const ulong pkts_mask, uint8_t **pkts, uint32_t *__restrict__ pkts_type,
+                             volatile uint *__restrict__ positions, volatile ulong *__restrict__ lookup_hit_mask) {
 
     if(!((pkts_mask>>blockIdx.x)&1))
         return;
@@ -335,11 +335,11 @@ __global__ void bv_search(	uint32_t **ranges, uint64_t *num_ranges, uint32_t *of
         uint x, pos;
         for(uint i=0; i<bv_bs; ++i) {
             x=0xffffffff;
-            for(uint b=0; b<blockDim.x; ++b){
-				if(!field_found[b])
-					goto end;
+            for(uint b=0; b<blockDim.x; ++b) {
+                if(!field_found[b])
+                    goto end;
                 x&=bv[b][i];
-			}
+            }
 
             if((pos=__ffs(x))!=0) {
                 positions[blockIdx.x]=(i<<5)+pos-1;
