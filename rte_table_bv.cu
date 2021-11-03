@@ -277,79 +277,92 @@ static int rte_table_bv_entry_delete_bulk(void  *t_r, void **ks_r, uint32_t n_ke
 
 __global__ void bv_search(	 uint32_t **ranges,  uint64_t *num_ranges,  uint32_t *offsets,  uint8_t *sizes,
                              uint32_t *ptype_mask,  uint32_t **bvs, const uint32_t bv_bs,
-                             const ulong pkts_mask, uint8_t **pkts, uint32_t *__restrict__ pkts_type,
-                             volatile uint *__restrict__ positions, volatile ulong *__restrict__ lookup_hit_mask) {
-
+                             volatile const ulong *pkts_mask, volatile uint8_t **pkts, uint32_t *__restrict__ pkts_type,
+                             uint *__restrict__ positions, ulong *__restrict__ lookup_hit_mask
+							 volatile ulong *done_pkts) {
+/*
     if(!((pkts_mask>>blockIdx.x)&1))
         return;
+*/
 
     uint8_t *pkt;
-    __shared__ uint *bv[24];
-    __shared__ bool field_found[24];
-    uint v=0;
+    __shared__ uint *bv[RTE_TABLE_BV_MAX_FIELDS];
+    __shared__ bool field_found[RTE_TABLE_BV_MAX_FIELDS];
 
-    field_found[threadIdx.x]=false;
 
-    const uint32_t ptype_a=pkts_type[blockIdx.x]&ptype_mask[threadIdx.x];
-    const bool ptype_matches=  (ptype_a&RTE_PTYPE_L2_MASK)!=0
-                               & (ptype_a&RTE_PTYPE_L3_MASK)!=0
-                               & (ptype_a&RTE_PTYPE_L4_MASK)!=0;
+    uint v;
 
-    if(ptype_matches) {
-        pkt=pkts[blockIdx.x]+offsets[threadIdx.x];
-
-        switch(sizes[threadIdx.x]) {
-        case 1:
-            v=*pkt;
-            break;
-        case 2:
-            v=pkt[1]+(pkt[0]<<8);
-            break;
-        case 4:
-            v=pkt[3]+(pkt[2]<<8)+(pkt[1]<<16)+(pkt[0]<<24);
-            break;
-        default:
-            printf("[%d|%d] unknown size: %ubit\n", blockIdx.x, threadIdx.x, sizes[threadIdx.x]);
-            break;
+    while(1) {
+        field_found[threadIdx.x]=false;
+        if(!threadIdx.x) {
+            while(((*pkts_mask)>>blockIdx.x)&1==0);
         }
 
-        uint *range_dim=ranges[threadIdx.x];
-        long se[]= {0, (long) num_ranges[threadIdx.x]};
-        uint8_t l,r;
-        bv[threadIdx.x]=NULL;
-        for(long i=se[1]>>1; se[0]<=se[1]; i=(se[0]+se[1])>>1) {
-            l=v>=range_dim[i<<1];
-            r=v<=range_dim[(i<<1)+1];
-            if(l&r) {
-                bv[threadIdx.x]=bvs[threadIdx.x]+i*RTE_TABLE_BV_BS;
-                field_found[threadIdx.x]=true;
+        __syncthreads();
+        const uint32_t ptype_a=pkts_type[blockIdx.x]&ptype_mask[threadIdx.x];
+        const bool ptype_matches=  (ptype_a&RTE_PTYPE_L2_MASK)!=0
+                                   & (ptype_a&RTE_PTYPE_L3_MASK)!=0
+                                   & (ptype_a&RTE_PTYPE_L4_MASK)!=0;
+
+        if(ptype_matches) {
+            pkt=pkts[blockIdx.x]+offsets[threadIdx.x];
+
+            switch(sizes[threadIdx.x]) {
+            case 1:
+                v=*pkt;
+                break;
+            case 2:
+                v=pkt[1]+(pkt[0]<<8);
+                break;
+            case 4:
+                v=pkt[3]+(pkt[2]<<8)+(pkt[1]<<16)+(pkt[0]<<24);
+                break;
+            default:
+                printf("[%d|%d] unknown size: %u byte\n", blockIdx.x, threadIdx.x, sizes[threadIdx.x]);
                 break;
             }
 
-            se[!l]=!l?i-1:i+1;
-        }
-    }
+            uint *range_dim=ranges[threadIdx.x];
+            long se[]= {0, (long) num_ranges[threadIdx.x]};
+            uint8_t l,r;
+            bv[threadIdx.x]=NULL;
+            for(long i=se[1]>>1; se[0]<=se[1]; i=(se[0]+se[1])>>1) {
+                l=v>=range_dim[i<<1];
+                r=v<=range_dim[(i<<1)+1];
+                if(l&r) {
+                    bv[threadIdx.x]=bvs[threadIdx.x]+i*RTE_TABLE_BV_BS;
+                    field_found[threadIdx.x]=true;
+                    break;
+                }
 
-    __syncthreads();
-    if(!threadIdx.x) {
-        uint x, pos;
-        for(uint i=0; i<bv_bs; ++i) {
-            x=0xffffffff;
-            for(uint b=0; b<blockDim.x; ++b) {
-                if(!field_found[b])
-                    goto end;
-                x&=bv[b][i];
-            }
-
-            if((pos=__ffs(x))!=0) {
-                positions[blockIdx.x]=(i<<5)+pos-1;
-                atomicOr((unsigned long long *)lookup_hit_mask, 1<<blockIdx.x);
-                break;
+                se[!l]=!l?i-1:i+1;
             }
         }
-    }
+
+        __syncthreads();
+        if(!threadIdx.x) {
+            uint x, pos;
+            for(uint i=0; i<bv_bs; ++i) {
+                x=0xffffffff;
+                for(uint b=0; b<blockDim.x; ++b) {
+                    if(!field_found[b])
+                        goto end;
+                    x&=bv[b][i];
+                }
+
+                if((pos=__ffs(x))!=0) {
+                    positions[blockIdx.x]=(i<<5)+pos-1;
+                    atomicOr((unsigned long long *)lookup_hit_mask, 1<<blockIdx.x);
+                    break;
+                }
+            }
+        }
+		
 end:
-    __syncthreads();
+        __syncthreads();
+		atomicOr((unsigned long long *) done_pkts, 1<<blockIdx.x);
+		atomicXor((unsigned long long *) pkts_mask, 1<<blockIdx.x);
+    }
 }
 
 static int rte_table_bv_lookup(void *t_r, struct rte_mbuf **pkts, uint64_t pkts_mask, uint64_t *lookup_hit_mask, void **e) {
