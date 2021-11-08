@@ -16,35 +16,37 @@ extern "C" {
 #define RTE_TABLE_BV_MAX_PKTS 64
 
 enum {
-	RTE_TABLE_BV_FIELD_TYPE_RANGE,
-	RTE_TABLE_BV_FIELD_TYPE_BITMASK
+    RTE_TABLE_BV_FIELD_TYPE_RANGE,
+    RTE_TABLE_BV_FIELD_TYPE_BITMASK
 };
 
 struct rte_table_bv_field_def {
-	uint32_t offset; // offset from data start
-	uint32_t ptype_mask; // packet type mask needed for matching
-	
-	uint8_t type;
-	uint8_t size; // in bytes
+    uint32_t offset; // offset from data start
+    uint32_t ptype_mask; // packet type mask needed for matching
+
+    uint8_t type;
+    uint8_t size; // in bytes
 };
 
 struct rte_table_bv_field {
-	uint32_t value;
-	uint32_t mask_range;
+    uint32_t value;
+    uint32_t mask_range;
 };
 
 struct rte_table_bv_params {
-	uint32_t num_fields;
-	// size needs to be  >=num_fields
-	const struct rte_table_bv_field_def *field_defs;
+    uint32_t num_fields;
+    // size needs to be  >=num_fields
+    const struct rte_table_bv_field_def *field_defs;
 };
 
 struct rte_table_bv_key {
-	uint32_t *buf; // size = sum(rte_table_bv_params[*].num_fields*2)
-	uint32_t pos;
+    uint32_t *buf; // size = sum(rte_table_bv_params[*].num_fields*2)
+    uint32_t pos;
 };
 
 extern struct rte_table_ops rte_table_bv_ops;
+
+int rte_table_bv_start_kernel(void *t_r);
 
 #ifdef __cplusplus
 }
