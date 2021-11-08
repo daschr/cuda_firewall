@@ -32,7 +32,7 @@ extern "C" {
 
 #include <cuda_runtime.h>
 
-#include "rte_table_bv.h"
+#include "rte_bv_classifier.h"
 #include "parser.h"
 #include "config.h"
 #include "misc.h"
@@ -41,11 +41,16 @@ extern "C" {
 
 struct rte_pktmbuf_extmem ext_mem;
 struct rte_mempool *mpool_payload;
-void *table;
+struct rte_bv_classifier *classifier;
 ruleset_t ruleset;
 uint16_t tap_port_id, trunk_port_id;
 
 volatile uint8_t running;
+
+typedef struct {
+    uint8_t *actions;
+    struct rte_ether_addr *tap_macaddr;
+} callback_payload_t;
 
 void exit_handler(int e) {
     running=0;
@@ -55,63 +60,58 @@ void exit_handler(int e) {
 
     free_ruleset(&ruleset);
 
-    rte_table_bv_ops.f_free(table);
+	rte_bv_classifier_free(classifier);
 
     rte_eal_cleanup();
 
     exit(EXIT_SUCCESS);
 }
 
-static __rte_noreturn void firewall(void *table, uint8_t *actions, struct rte_ether_addr *tap_macaddr) {
-    volatile uint64_t *lookup_hit_mask, *lookup_hit_mask_d, pkts_mask;
-    volatile uint32_t *positions, *positions_d;
+void tx_callback(struct rte_mbuf **pkts, uint64_t pkts_mask, uint64_t lookup_hit_mask, uint32_t *positions, void *p_r) {
+    callback_payload_t *p=(callback_payload_t *) p_r;
+    const uint16_t nb_rx=__builtin_popcount(pkts_mask);
+    uint16_t i=0, j=0;
+	struct rte_mbuf *bufs_tx[64];
 
-    cudaHostAlloc((void **) &positions, sizeof(uint32_t)*BURST_SIZE, cudaHostAllocMapped);
-    cudaHostGetDevicePointer((void **) &positions_d, (uint32_t *) positions, 0);
-
-    cudaHostAlloc((void **) &lookup_hit_mask, sizeof(uint64_t), cudaHostAllocMapped);
-    cudaHostGetDevicePointer((void **) &lookup_hit_mask_d, (uint64_t *) lookup_hit_mask, 0);
-
-    struct rte_mbuf **bufs_rx;
-    struct rte_mbuf **bufs_rx_d;
-    cudaHostAlloc((void **) &bufs_rx, sizeof(struct rte_mbuf*)*BURST_SIZE, cudaHostAllocMapped);
-    cudaHostGetDevicePointer((void **) &bufs_rx_d, bufs_rx, 0);
-
-    struct rte_mbuf *bufs_tx[BURST_SIZE];
-
-    const int (*lookup) (void *, struct rte_mbuf **, uint64_t, uint64_t *, void **)=rte_table_bv_ops.f_lookup;
-
-    int16_t i,j;
-
-    *lookup_hit_mask=0;
-    for(;; *lookup_hit_mask=0) {
-        const uint16_t nb_rx = rte_eth_rx_burst(trunk_port_id, 0, bufs_rx, BURST_SIZE);
-
-        if(unlikely(nb_rx==0))
-            continue;
-
-        pkts_mask=(1<<nb_rx)-1;
-
-        lookup(table, bufs_rx_d, pkts_mask, (uint64_t *) lookup_hit_mask_d, (void **) positions_d);
-
-        i=0;
-        j=0;
-
-        for(; i<nb_rx; ++i) {
-            if(!(  (*lookup_hit_mask>>i)&1  &  (actions[positions[i]]==RULE_DROP) )) {
-                bufs_tx[j++]=bufs_rx[i];
-                if(tap_macaddr!=NULL)
-                    rte_memcpy(&(rte_pktmbuf_mtod(bufs_rx[i], struct rte_ether_hdr *)->dst_addr), tap_macaddr, 6);
-            }
-        }
-
-        const uint16_t nb_tx = rte_eth_tx_burst(tap_port_id, 0, bufs_tx, j);
-
-        if(unlikely(nb_tx<nb_rx)) {
-            for(uint16_t b=nb_tx; b<nb_rx; ++b)
-                rte_pktmbuf_free(bufs_rx[b]);
+    for(; i<nb_rx; ++i) {
+        if(!(  (lookup_hit_mask>>i)&1  &  (p->actions[positions[i]]==RULE_DROP) )) {
+            bufs_tx[j++]=pkts[i];
+            if(p->tap_macaddr)
+                rte_memcpy(&(rte_pktmbuf_mtod(pkts[i], struct rte_ether_hdr *)->dst_addr), p->tap_macaddr, 6);
         }
     }
+
+    const uint16_t nb_tx = rte_eth_tx_burst(tap_port_id, 0, bufs_tx, j);
+
+    if(unlikely(nb_tx<nb_rx)) {
+        for(uint16_t b=nb_tx; b<nb_rx; ++b)
+            rte_pktmbuf_free(pkts[b]);
+    }
+}
+
+int trunk_rx(void *arg){
+	struct rte_bv_classifier *c=(struct rte_bv_classifier *) arg;
+	struct rte_mbuf *bufs_rx[BURST_SIZE];
+	uint64_t pkts_mask;
+
+	for(;;){
+		const uint16_t nb_rx = rte_eth_rx_burst(trunk_port_id, 0, bufs_rx, BURST_SIZE);
+		
+		if(unlikely(nb_rx==0))
+			continue;
+		
+		pkts_mask=(1<<nb_rx)-1;
+
+		rte_bv_classifier_enqueue_burst(c, bufs_rx, pkts_mask);
+	}
+
+	return 0;
+}
+
+static __rte_noreturn void trunk_tx(struct rte_bv_classifier *c, uint8_t *actions, struct rte_ether_addr *tap_macaddr) {
+	callback_payload_t payload={.actions=actions, .tap_macaddr=tap_macaddr};
+
+  	rte_bv_classifier_poll_lookups(c, tx_callback, (void *) &payload); 
 }
 
 static int tap_tx(__rte_unused void *arg) {
@@ -207,7 +207,7 @@ int main(int ac, char *as[]) {
 
     printf("parsed ruleset \"%s\" with %lu rules\n", as[0], ruleset.num_rules);
 
-    struct rte_table_bv_field_def fdefs[5];
+    struct rte_bv_classifier_field_def fdefs[5];
     uint32_t fdefs_offsets[5]= {	offsetof(struct rte_ipv4_hdr, src_addr),
                                     offsetof(struct rte_ipv4_hdr, dst_addr),
                                     sizeof(struct rte_ipv4_hdr)+offsetof(struct rte_tcp_hdr, src_port),
@@ -225,28 +225,31 @@ int main(int ac, char *as[]) {
 
     for(size_t i=0; i<5; ++i) {
         fdefs[i].offset=sizeof(struct rte_ether_hdr) + fdefs_offsets[i];
-        fdefs[i].type=RTE_TABLE_BV_FIELD_TYPE_RANGE;
+        fdefs[i].type=RTE_BV_CLASSIFIER_FIELD_TYPE_RANGE;
         fdefs[i].ptype_mask=ptype_masks[i];
         fdefs[i].size=fdefs_sizes[i];
     }
 
-    struct rte_table_bv_params table_params = { .num_fields=5, .field_defs=fdefs };
+    struct rte_bv_classifier_params classifier_params = { .num_fields=5, .field_defs=fdefs };
 
-    void *table=rte_table_bv_ops.f_create(&table_params, rte_socket_id(), 0);
+    classifier=rte_bv_classifier_create(&classifier_params, rte_socket_id());
 
-    if(table==NULL)
+    if(classifier==NULL)
         goto err;
 
-    rte_table_bv_ops.f_add_bulk(table, (void **) ruleset.rules, NULL, ruleset.num_rules, NULL, NULL);
+    rte_bv_classifier_entry_add_bulk(classifier, ruleset.rules, ruleset.num_rules);
 
     free_ruleset_except_actions(&ruleset);
 
     rte_eal_wait_lcore(1);
     rte_eal_remote_launch(tap_tx, NULL, 1);
 
-    firewall(table, ruleset.actions, &tap_macaddr);
+    rte_eal_wait_lcore(2);
+    rte_eal_remote_launch(trunk_rx, (void *) classifier, 2);
 
-    rte_table_bv_ops.f_free(table);
+    trunk_tx(classifier, ruleset.actions, &tap_macaddr);
+
+    rte_bv_classifier_free(classifier);
 
     free(ruleset.actions);
 

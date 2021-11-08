@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include "rte_bv.h"
+#include "rte_bv_classifier.h"
 
 #define INITIAL_BUFSIZE 16
 
@@ -16,7 +17,7 @@ enum {
 typedef struct {
     size_t num_rules;
     size_t rules_size;
-    struct rte_table_bv_key **rules;
+    struct rte_bv_classifier_key **rules;
 	uint8_t *actions; 
 } ruleset_t;
 

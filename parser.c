@@ -1,6 +1,6 @@
 #include "parser.h"
 
-#include "rte_table_bv.h"
+#include "rte_bv_classifier.h"
 #include <stdlib.h>
 #include <stdio.h>
 
@@ -25,7 +25,7 @@ bool parse_ruleset(ruleset_t *ruleset, const char *file) {
     char v_buf[3][13], command[13];
 
     if(ruleset->rules==NULL) {
-        if((ruleset->rules=malloc(sizeof(struct rte_table_bv_key *)*INITIAL_BUFSIZE))==NULL) {
+        if((ruleset->rules=malloc(sizeof(struct rte_bv_classifier_key *)*INITIAL_BUFSIZE))==NULL) {
             fprintf(stderr, "ERROR: could not allocate memory for rules!\n");
             goto failure;
         }
@@ -36,7 +36,7 @@ bool parse_ruleset(ruleset_t *ruleset, const char *file) {
 		}
 
         for(size_t i=0; i<INITIAL_BUFSIZE; ++i) {
-            if((ruleset->rules[i]=malloc(sizeof(struct rte_table_bv_key)))==NULL) {
+            if((ruleset->rules[i]=malloc(sizeof(struct rte_bv_classifier_key)))==NULL) {
                 fprintf(stderr, "ERROR: could not allocate memory for %luth rule!\n", i);
                 goto failure;
             }
@@ -90,7 +90,7 @@ bool parse_ruleset(ruleset_t *ruleset, const char *file) {
 
             if(++(ruleset->num_rules)==ruleset->rules_size) {
                 ruleset->rules_size<<=1;
-                if((ruleset->rules=realloc(ruleset->rules, sizeof(struct rte_table_bv_key *)*ruleset->rules_size))==NULL) {
+                if((ruleset->rules=realloc(ruleset->rules, sizeof(struct rte_bv_classifier_key *)*ruleset->rules_size))==NULL) {
                     fprintf(stderr, "ERROR: could not realloc memory for rules!\n");
                     goto failure;
                 }
@@ -101,7 +101,8 @@ bool parse_ruleset(ruleset_t *ruleset, const char *file) {
                 }
 
                 for(size_t i=ruleset->rules_size>>1; i<ruleset->rules_size; ++i) {
-                    if((ruleset->rules[i]=malloc(sizeof(struct rte_table_bv_key)))==NULL) {
+                    if((ruleset->rules[i]=malloc(sizeof(struct rte_bv_classifier_key)))==NULL) {
+
                         fprintf(stderr, "ERROR: could not allocate memory for %luth rule!\n", i);
                         goto failure;
                     }
