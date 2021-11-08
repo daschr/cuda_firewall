@@ -238,6 +238,7 @@ int main(int ac, char *as[]) {
         goto err;
 
     rte_table_bv_ops.f_add_bulk(table, (void **) ruleset.rules, NULL, ruleset.num_rules, NULL, NULL);
+    rte_table_bv_start_kernel(table);
 
     free_ruleset_except_actions(&ruleset);
 
