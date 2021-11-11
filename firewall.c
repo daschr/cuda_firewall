@@ -54,13 +54,16 @@ typedef struct {
 
 void exit_handler(int e) {
     running=0;
-    printf("[exit_handler] waiting for lcore 1...\n");
-    rte_eal_wait_lcore(1);
-    puts("lcore 1 stopped...");
+
+    for(unsigned int i=1; i<3; ++i) {
+        printf("[exit_handler] waiting for lcore %d...\n", i);
+        rte_eal_wait_lcore(i);
+        printf("lcore %d stopped...\n", i);
+    }
 
     free_ruleset(&ruleset);
 
-	rte_bv_classifier_free(classifier);
+    rte_bv_classifier_free(classifier);
 
     rte_eal_cleanup();
 
@@ -71,7 +74,7 @@ void tx_callback(struct rte_mbuf **pkts, uint64_t pkts_mask, uint64_t lookup_hit
     callback_payload_t *p=(callback_payload_t *) p_r;
     const uint16_t nb_rx=__builtin_popcount(pkts_mask);
     uint16_t i=0, j=0;
-	struct rte_mbuf *bufs_tx[64];
+    struct rte_mbuf *bufs_tx[64];
 
     for(; i<nb_rx; ++i) {
         if(!(  (lookup_hit_mask>>i)&1  &  (p->actions[positions[i]]==RULE_DROP) )) {
@@ -83,47 +86,52 @@ void tx_callback(struct rte_mbuf **pkts, uint64_t pkts_mask, uint64_t lookup_hit
 
     const uint16_t nb_tx = rte_eth_tx_burst(tap_port_id, 0, bufs_tx, j);
 
+    printf("[tx_callback] nb_rx: %u nb_tx: %u\n", nb_rx, nb_tx);
     if(unlikely(nb_tx<nb_rx)) {
         for(uint16_t b=nb_tx; b<nb_rx; ++b)
             rte_pktmbuf_free(pkts[b]);
     }
 }
 
-int trunk_rx(void *arg){
-	struct rte_bv_classifier *c=(struct rte_bv_classifier *) arg;
-	struct rte_mbuf *bufs_rx[BURST_SIZE];
-	uint64_t pkts_mask;
+int trunk_rx(void *arg) {
+    struct rte_bv_classifier *c=(struct rte_bv_classifier *) arg;
+    struct rte_mbuf *bufs_rx[BURST_SIZE];
+    uint64_t pkts_mask;
 
-	for(;;){
-		const uint16_t nb_rx = rte_eth_rx_burst(trunk_port_id, 0, bufs_rx, BURST_SIZE);
-		
-		if(unlikely(nb_rx==0))
-			continue;
-		
-		pkts_mask=(1<<nb_rx)-1;
+    while(running) {
+        const uint16_t nb_rx = rte_eth_rx_burst(trunk_port_id, 0, bufs_rx, BURST_SIZE);
 
-		rte_bv_classifier_enqueue_burst(c, bufs_rx, pkts_mask);
-	}
+        if(unlikely(nb_rx==0))
+            continue;
 
-	return 0;
+
+        printf("[trunk_rx] nb_rx: %u\n", nb_rx);
+        pkts_mask=(1<<nb_rx)-1;
+
+        rte_bv_classifier_enqueue_burst(c, bufs_rx, pkts_mask);
+    }
+
+    return 0;
 }
 
 static __rte_noreturn void trunk_tx(struct rte_bv_classifier *c, uint8_t *actions, struct rte_ether_addr *tap_macaddr) {
-	callback_payload_t payload={.actions=actions, .tap_macaddr=tap_macaddr};
+    callback_payload_t payload= {.actions=actions, .tap_macaddr=tap_macaddr};
 
-  	rte_bv_classifier_poll_lookups(c, tx_callback, (void *) &payload); 
+    rte_bv_classifier_poll_lookups(c, tx_callback, (void *) &payload);
 }
 
 static int tap_tx(__rte_unused void *arg) {
     struct rte_mbuf *bufs_rx[BURST_SIZE];
 
-    for(; running;) {
+    while(running) {
         const uint16_t nb_rx = rte_eth_rx_burst(tap_port_id, 0, bufs_rx, BURST_SIZE);
 
         if(unlikely(nb_rx==0))
             continue;
 
         const uint16_t nb_tx = rte_eth_tx_burst(trunk_port_id, 0, bufs_rx, nb_rx);
+
+        printf("[tap_tx] nb_rx: %u nb_tx: %u\n", nb_rx, nb_tx);
 
         if(unlikely(nb_tx<nb_rx)) {
             for(uint16_t b=nb_tx; b<nb_rx; ++b)
@@ -161,7 +169,7 @@ int main(int ac, char *as[]) {
 
     signal(SIGINT, exit_handler);
     signal(SIGKILL, exit_handler);
-    signal(SIGSEGV, exit_handler);
+//    signal(SIGSEGV, exit_handler);
 
     int offset;
 
@@ -234,8 +242,10 @@ int main(int ac, char *as[]) {
 
     classifier=rte_bv_classifier_create(&classifier_params, rte_socket_id());
 
-    if(classifier==NULL)
+    if(classifier==NULL) {
+        printf("classifier==NULL\n");
         goto err;
+    }
 
     rte_bv_classifier_entry_add_bulk(classifier, ruleset.rules, ruleset.num_rules);
 

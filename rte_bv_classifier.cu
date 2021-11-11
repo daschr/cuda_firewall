@@ -318,7 +318,7 @@ void rte_bv_classifier_enqueue_burst(struct rte_bv_classifier *c, struct rte_mbu
     const size_t epos=c->enqueue_pos;
 
     for(;;) {
-        pthread_mutex_lock(&c->stream_running_mtx[epos]);;
+        pthread_mutex_lock(&c->stream_running_mtx[epos]);
         if(!c->stream_running[epos]) {
 
             c->pkts_mask[epos]=pkts_mask;
@@ -337,15 +337,16 @@ void rte_bv_classifier_enqueue_burst(struct rte_bv_classifier *c, struct rte_mbu
                     c->positions[epos], c->lookup_hit_mask[epos]);
             c->stream_running[epos]=1;
             c->enqueue_pos=(epos+1)&RTE_BV_CLASSIFIER_NUM_STREAMS_MASK;
+            pthread_mutex_unlock(&c->stream_running_mtx[epos]);
             break;
         }
-        pthread_mutex_unlock(&c->stream_running_mtx[epos]);;
+        pthread_mutex_unlock(&c->stream_running_mtx[epos]);
     }
 
 }
 
 void __rte_noreturn rte_bv_classifier_poll_lookups(struct rte_bv_classifier *c, void (*callback) (struct rte_mbuf **, uint64_t,  uint64_t, uint32_t *, void *), void *p) {
-    size_t dpos;
+    size_t dpos=0;
     uint8_t stream_running;
 
     for(;;) {
@@ -353,14 +354,14 @@ void __rte_noreturn rte_bv_classifier_poll_lookups(struct rte_bv_classifier *c, 
             pthread_mutex_lock(&c->stream_running_mtx[dpos]);
             stream_running=c->stream_running[dpos];
             pthread_mutex_unlock(&c->stream_running_mtx[dpos]);
-        } while(stream_running);
+        } while(!stream_running);
 
         cudaStreamSynchronize(c->streams[dpos]);
 
         callback(c->pkts[dpos], c->pkts_mask[dpos], *(c->lookup_hit_mask_h[dpos]), c->positions_h[dpos], p);
 
         pthread_mutex_lock(&c->stream_running_mtx[dpos]);
-        stream_running=0;
+        c->stream_running[dpos]=0;
         pthread_mutex_unlock(&c->stream_running_mtx[dpos]);
 
         dpos=(++dpos)&RTE_BV_CLASSIFIER_NUM_STREAMS_MASK;
