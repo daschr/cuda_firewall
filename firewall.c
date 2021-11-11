@@ -74,7 +74,7 @@ void tx_callback(struct rte_mbuf **pkts, uint64_t pkts_mask, uint64_t lookup_hit
     callback_payload_t *p=(callback_payload_t *) p_r;
     const uint16_t nb_rx=__builtin_popcount(pkts_mask);
     uint16_t i=0, j=0;
-    struct rte_mbuf *bufs_tx[64];
+    struct rte_mbuf *bufs_tx[BURST_SIZE];
 
     for(; i<nb_rx; ++i) {
         if(!(  (lookup_hit_mask>>i)&1  &  (p->actions[positions[i]]==RULE_DROP) )) {
@@ -86,7 +86,6 @@ void tx_callback(struct rte_mbuf **pkts, uint64_t pkts_mask, uint64_t lookup_hit
 
     const uint16_t nb_tx = rte_eth_tx_burst(tap_port_id, 0, bufs_tx, j);
 
-    printf("[tx_callback] nb_rx: %u nb_tx: %u\n", nb_rx, nb_tx);
     if(unlikely(nb_tx<nb_rx)) {
         for(uint16_t b=nb_tx; b<nb_rx; ++b)
             rte_pktmbuf_free(pkts[b]);
@@ -104,8 +103,6 @@ int trunk_rx(void *arg) {
         if(unlikely(nb_rx==0))
             continue;
 
-
-        printf("[trunk_rx] nb_rx: %u\n", nb_rx);
         pkts_mask=(1<<nb_rx)-1;
 
         rte_bv_classifier_enqueue_burst(c, bufs_rx, pkts_mask);
@@ -131,7 +128,6 @@ static int tap_tx(__rte_unused void *arg) {
 
         const uint16_t nb_tx = rte_eth_tx_burst(trunk_port_id, 0, bufs_rx, nb_rx);
 
-        printf("[tap_tx] nb_rx: %u nb_tx: %u\n", nb_rx, nb_tx);
 
         if(unlikely(nb_tx<nb_rx)) {
             for(uint16_t b=nb_tx; b<nb_rx; ++b)
@@ -146,9 +142,9 @@ static uint8_t find_tap_trunk_devs(uint16_t *tap_id, uint16_t *trunk_id) {
     struct rte_eth_dev_info dev_info;
     uint8_t found_ports=0, avail_eths=rte_eth_dev_count_avail();
 
-    for(uint32_t id=0; id<avail_eths&found_ports!=3; ++id) {
+    for(uint32_t id=0; id<avail_eths && found_ports!=3; ++id) {
         rte_eth_dev_info_get(id, &dev_info);
-        if(strcmp(dev_info.driver_name, "net_tap")==0&!(found_ports&1)) {
+        if(strcmp(dev_info.driver_name, "net_tap")==0&&!(found_ports&1)) {
             *tap_id=id;
             found_ports|=1;
         } else if((~found_ports)&2) {

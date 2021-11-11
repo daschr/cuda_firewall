@@ -364,7 +364,7 @@ void __rte_noreturn rte_bv_classifier_poll_lookups(struct rte_bv_classifier *c, 
         c->stream_running[dpos]=0;
         pthread_mutex_unlock(&c->stream_running_mtx[dpos]);
 
-        dpos=(++dpos)&RTE_BV_CLASSIFIER_NUM_STREAMS_MASK;
+        dpos=(dpos+1)&RTE_BV_CLASSIFIER_NUM_STREAMS_MASK;
     }
 }
 
