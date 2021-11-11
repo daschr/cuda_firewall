@@ -138,9 +138,9 @@ static uint8_t find_tap_trunk_devs(uint16_t *tap_id, uint16_t *trunk_id) {
     struct rte_eth_dev_info dev_info;
     uint8_t found_ports=0, avail_eths=rte_eth_dev_count_avail();
 
-    for(uint32_t id=0; id<avail_eths&found_ports!=3; ++id) {
+    for(uint32_t id=0; id<avail_eths&&found_ports!=3; ++id) {
         rte_eth_dev_info_get(id, &dev_info);
-        if(strcmp(dev_info.driver_name, "net_tap")==0&!(found_ports&1)) {
+        if(strcmp(dev_info.driver_name, "net_tap")==0&&!(found_ports&1)) {
             *tap_id=id;
             found_ports|=1;
         } else if((~found_ports)&2) {

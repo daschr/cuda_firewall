@@ -17,7 +17,7 @@ bool parse_ruleset(ruleset_t *ruleset, const char *file) {
 
     char *inp_line;
     if((inp_line=malloc(sizeof(char)*PARSER_LINESIZE))==NULL) {
-        fprintf(stderr, "ERROR: could not allocate %lu bytes for line buffer\n", PARSER_LINESIZE);
+        fprintf(stderr, "ERROR: could not allocate %u bytes for line buffer\n", PARSER_LINESIZE);
         return false;
     }
 
@@ -82,7 +82,7 @@ bool parse_ruleset(ruleset_t *ruleset, const char *file) {
             } else if(strcmp(command, "ACCEPT")==0) {
                 ruleset->actions[ruleset->num_rules]=RULE_ACCEPT;
             } else {
-                fprintf(stderr, "ERROR: could not parse command \"%d\"\n", command);
+                fprintf(stderr, "ERROR: could not parse command \"%s\"\n", command);
                 goto failure;
             }
 
