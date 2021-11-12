@@ -47,7 +47,7 @@ void exit_handler(int e) {
 	for(int i=0;i<1;++i){
     	printf("[exit_handler] waiting for lcore %d...\n", i);
     	rte_eal_wait_lcore(i);
-    	printf("lcore %d stopped...", i);
+    	printf("lcore %d stopped...\n", i);
 	}
 
     rte_eal_cleanup();
