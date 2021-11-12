@@ -51,7 +51,7 @@ void exit_handler(int e) {
     running=0;
     printf("[exit_handler] waiting for lcore 1...\n");
     rte_eal_wait_lcore(1);
-    puts("lcore 1 stopped...");
+    puts("lcore 1 stopped...\n");
 
     free_ruleset(&ruleset);
 
@@ -117,7 +117,7 @@ static __rte_noreturn void firewall(void *table, uint8_t *actions, struct rte_et
 static int tap_tx(__rte_unused void *arg) {
     struct rte_mbuf *bufs_rx[BURST_SIZE];
 
-    for(; running;) {
+    while(running) {
         const uint16_t nb_rx = rte_eth_rx_burst(tap_port_id, 0, bufs_rx, BURST_SIZE);
 
         if(unlikely(nb_rx==0))
