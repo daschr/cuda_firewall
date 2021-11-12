@@ -44,11 +44,11 @@ volatile uint8_t running;
 void exit_handler(int e) {
     running=0;
 
-	for(int i=0;i<1;++i){
-    	printf("[exit_handler] waiting for lcore %d...\n", i);
-    	rte_eal_wait_lcore(i);
-    	printf("lcore %d stopped...\n", i);
-	}
+    for(int i=0; i<1; ++i) {
+        printf("[exit_handler] waiting for lcore %d...\n", i);
+        rte_eal_wait_lcore(i);
+        printf("lcore %d stopped...\n", i);
+    }
 
     rte_eal_cleanup();
 
@@ -63,6 +63,8 @@ static __rte_noreturn void plain_fwd(struct rte_ether_addr *tap_macaddr) {
 
         if(unlikely(nb_rx==0))
             continue;
+        for(uint16_t i=0; i<nb_rx; ++i)
+            rte_memcpy(&(rte_pktmbuf_mtod(bufs_rx[i], struct rte_ether_hdr *)->dst_addr), tap_macaddr, 6);
 
         const uint16_t nb_tx = rte_eth_tx_burst(tap_port_id, 0, bufs_rx, nb_rx);
 
@@ -140,10 +142,21 @@ int main(int ac, char *as[]) {
         return EXIT_FAILURE;
     }
 
-    if(setup_port(trunk_port_id, &ext_mem, mpool_payload)|setup_port(tap_port_id, &ext_mem, mpool_payload)) {
+#define RX_OC(X) RTE_ETH_RX_OFFLOAD_##X
+#define TX_OC(X) RTE_ETH_TX_OFFLOAD_##X
+
+    if(setup_port(trunk_port_id, &ext_mem, mpool_payload,
+                  TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM),
+                  TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM))
+            |setup_port(tap_port_id, &ext_mem, mpool_payload,
+                        TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM),
+                        TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM))) {
         rte_eal_cleanup();
         return EXIT_FAILURE;
     }
+
+#undef RX_OC
+#undef TX_OC
 
     rte_eal_wait_lcore(1);
     rte_eal_remote_launch(tap_tx, NULL, 1);

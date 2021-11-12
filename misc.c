@@ -63,7 +63,7 @@ int setup_memory(struct rte_pktmbuf_extmem *ext_mem, struct rte_mempool **mpool_
 }
 
 #define CHECK_R(X) if(X){fprintf(stderr, "Error: " #X  " (r=%d)\n", r); return 1;}
-int setup_port(uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte_mempool *mpool_payload) {
+int setup_port(uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte_mempool *mpool_payload, uint64_t rx_offload_capas, uint64_t tx_offload_capas) {
     struct rte_eth_conf port_conf = {
         .rxmode = {
             .mq_mode=RTE_ETH_MQ_RX_NONE,
@@ -88,8 +88,10 @@ int setup_port(uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte_
 #define RX_OC(X) RTE_ETH_RX_OFFLOAD_##X
 #define TX_OC(X) RTE_ETH_TX_OFFLOAD_##X
 
-    port_conf.rxmode.offloads=RX_OC(IPV4_CKSUM)|RX_OC(TCP_CKSUM)|RX_OC(UDP_CKSUM); //dev_info.rx_offload_capa;
-    port_conf.txmode.offloads=TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM)|TX_OC(TCP_TSO); //dev_info.tx_offload_capa;
+    port_conf.rxmode.offloads=rx_offload_capas;
+//RX_OC(IPV4_CKSUM)|RX_OC(TCP_CKSUM)|RX_OC(UDP_CKSUM); //dev_info.rx_offload_capa;
+    port_conf.txmode.offloads=tx_offload_capas;
+//TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM);//|TX_OC(TCP_TSO); //dev_info.tx_offload_capa;
 
 #undef RX_OC
 #undef TX_OC
