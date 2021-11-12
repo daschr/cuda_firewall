@@ -113,10 +113,6 @@ static uint8_t find_tap_trunk_devs(uint16_t *tap_id, uint16_t *trunk_id) {
 
 int main(int ac, char *as[]) {
     running=1;
-    if(ac==1) {
-        fprintf(stderr, "Usage: %s [rules]\n", as[0]);
-        return EXIT_FAILURE;
-    }
 
     signal(SIGINT, exit_handler);
     signal(SIGKILL, exit_handler);
@@ -127,13 +123,6 @@ int main(int ac, char *as[]) {
     if((offset=rte_eal_init(ac, as))<0)
         rte_exit(EXIT_FAILURE, "Error: could not init EAL.\n");
     ++offset;
-
-    if(offset>=ac) {
-        rte_exit(EXIT_FAILURE, "Usage: %s [[rte  arguments]...] [rules]\n", as[0]);
-    }
-
-    ac-=offset;
-    as=as+offset;
 
     uint16_t avail_eths;
     struct rte_ether_addr tap_macaddr;
