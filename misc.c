@@ -5,6 +5,8 @@ extern "C" {
 #include "misc.h"
 
 #include <stdint.h>
+#include <string.h>
+#include <time.h>
 
 #include <rte_common.h>
 #include <rte_log.h>
@@ -26,6 +28,8 @@ extern "C" {
 #include "config.h"
 #include "offload_capas.h"
 
+#define KNI_FIFO_COUNT_MAX 1024
+
 static inline void check_error(cudaError_t e, const char *file, int line) {
     if(e != cudaSuccess) {
         fprintf(stderr, "[ERROR] %s in %s (line %d)\n", cudaGetErrorString(e), file, line);
@@ -35,7 +39,12 @@ static inline void check_error(cudaError_t e, const char *file, int line) {
 #define CHECK(X) (check_error(X, __FILE__, __LINE__))
 
 
-int setup_memory(struct rte_pktmbuf_extmem *ext_mem, struct rte_mempool **mpool_payload) {
+int setup_memory(struct rte_pktmbuf_extmem *ext_mem, struct rte_mempool **mpool) {
+    if(DEFAULT_NB_MBUF<KNI_FIFO_COUNT_MAX*2) {
+        fprintf(stderr, "DEFAULT_NB_MBUF=%u<%u=KNI_FIFO_COUNT_MAX*2\n", DEFAULT_NB_MBUF, KNI_FIFO_COUNT_MAX*2);
+        return 1;
+    }
+
     memset(ext_mem, 0, sizeof(struct rte_pktmbuf_extmem));
 
     ext_mem->elt_size= DEFAULT_MBUF_DATAROOM + RTE_PKTMBUF_HEADROOM;
@@ -50,11 +59,11 @@ int setup_memory(struct rte_pktmbuf_extmem *ext_mem, struct rte_mempool **mpool_
         return 1;
     }
 
-    *mpool_payload=rte_pktmbuf_pool_create_extbuf("payload_mpool", DEFAULT_NB_MBUF,
-                   0, 0, ext_mem->elt_size,
-                   rte_socket_id(), ext_mem, 1);
+    *mpool=rte_pktmbuf_pool_create_extbuf("payload_mpool", DEFAULT_NB_MBUF,
+                                          0, 0, ext_mem->elt_size,
+                                          rte_socket_id(), ext_mem, 1);
 
-    if(!*mpool_payload) {
+    if(!*mpool) {
         fprintf(stderr, "Error: could not create mempool from external memory\n");
         return 1;
     }
@@ -62,8 +71,44 @@ int setup_memory(struct rte_pktmbuf_extmem *ext_mem, struct rte_mempool **mpool_
     return 0;
 }
 
+struct rte_kni *setup_kni_port(uint16_t port_id, uint32_t core_id, uint16_t group_id, struct rte_mempool *mpool) {
+    int r;
+    struct rte_kni_conf conf;
+    struct rte_kni_ops ops;
+
+    memset(&ops, 0, sizeof(struct rte_kni_ops));
+    memset(&conf, 0, sizeof(struct rte_kni_conf));
+
+    ops.port_id=port_id;
+
+    strcpy(conf.name, FW_IFACE_NAME);
+    conf.core_id=core_id;
+    conf.group_id=port_id;
+    conf.force_bind=0;
+    conf.mbuf_size=DEFAULT_MBUF_DATAROOM;
+
+    struct rte_eth_dev_info dev_info;
+    if((r=rte_eth_dev_info_get(port_id, &dev_info))!=0) {
+        fprintf(stderr, "Failed to get device info (port %u): %s\n", port_id, rte_strerror(-r));
+        return NULL;
+    }
+
+    conf.min_mtu=dev_info.min_mtu;
+    conf.max_mtu=dev_info.max_mtu;
+
+    rte_eth_dev_get_mtu(port_id, &conf.mtu);
+
+    // copy mac from corresponding trunk port
+    if((r=rte_eth_macaddr_get(port_id, (struct rte_ether_addr *) &conf.mac_addr))!=0) {
+        fprintf(stderr, "Failed to get MAC address (port %u): %s\n", port_id, rte_strerror(-r));
+        return NULL;
+    }
+
+    return rte_kni_alloc(mpool, &conf, &ops);
+}
+
 #define CHECK_R(X) if(X){fprintf(stderr, "Error: " #X  " (r=%d)\n", r); return 1;}
-int setup_port(uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte_mempool *mpool_payload, uint64_t rx_offload_capas, uint64_t tx_offload_capas) {
+int setup_port(uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte_mempool *mpool, uint64_t rx_offload_capas, uint64_t tx_offload_capas) {
     struct rte_eth_conf port_conf = {
         .rxmode = {
             .mq_mode=RTE_ETH_MQ_RX_NONE,
@@ -114,7 +159,7 @@ int setup_port(uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte_
 
     CHECK_R((r=rte_eth_tx_queue_setup(port_id, 0, DEFAULT_NB_TX_DESC, rte_eth_dev_socket_id(0), &txconf))<0);
 
-    CHECK_R((r=rte_eth_rx_queue_setup(port_id, 0, DEFAULT_NB_RX_DESC, rte_eth_dev_socket_id(0), NULL, mpool_payload))<0);
+    CHECK_R((r=rte_eth_rx_queue_setup(port_id, 0, DEFAULT_NB_RX_DESC, rte_eth_dev_socket_id(0), NULL, mpool))<0);
 
     rte_dev_dma_map(dev_info.device, ext_mem->buf_ptr, ext_mem->buf_iova, ext_mem->buf_len);
 

@@ -5,6 +5,7 @@ extern "C" {
 #include <stdlib.h>
 #include <stdio.h>
 #include <signal.h>
+#include <unistd.h>
 
 #include <rte_common.h>
 #include <rte_log.h>
@@ -29,6 +30,7 @@ extern "C" {
 #include <rte_metrics.h>
 #include <rte_bitrate.h>
 #include <rte_latencystats.h>
+#include <rte_kni.h>
 
 #include "config.h"
 #include "misc.h"
@@ -38,79 +40,80 @@ extern "C" {
 struct rte_pktmbuf_extmem ext_mem;
 struct rte_mempool *mpool_payload;
 uint16_t tap_port_id, trunk_port_id;
+struct rte_kni *kni;
+
 
 volatile uint8_t running;
 
 void exit_handler(int e) {
     running=0;
 
-    for(int i=0; i<1; ++i) {
+    for(int i=1; i<3; ++i) {
         printf("[exit_handler] waiting for lcore %d...\n", i);
         rte_eal_wait_lcore(i);
         printf("lcore %d stopped...\n", i);
     }
 
+    sleep(5);
+    puts("rte_kni_release");
+    if(rte_kni_release(kni)<0) {
+        fprintf(stderr, "error releasing kni\n");
+    }
+
+    puts("rte_kni_close");
+    rte_kni_close();
+    sleep(5);
+    puts("rte_eal_cleanup");
     rte_eal_cleanup();
 
     exit(EXIT_SUCCESS);
 }
 
-static __rte_noreturn void plain_fwd(struct rte_ether_addr *tap_macaddr) {
+static int fw_ingress(__rte_unused void *arg) {
     struct rte_mbuf *bufs_rx[BURST_SIZE];
 
-    for(;;) {
+    while(running) {
         const uint16_t nb_rx = rte_eth_rx_burst(trunk_port_id, 0, bufs_rx, BURST_SIZE);
 
         if(unlikely(nb_rx==0))
             continue;
-        for(uint16_t i=0; i<nb_rx; ++i)
-            rte_memcpy(&(rte_pktmbuf_mtod(bufs_rx[i], struct rte_ether_hdr *)->dst_addr), tap_macaddr, 6);
 
-        const uint16_t nb_tx = rte_eth_tx_burst(tap_port_id, 0, bufs_rx, nb_rx);
+        const uint16_t nb_tx = rte_kni_tx_burst(kni, bufs_rx, nb_rx);
 
-        if(unlikely(nb_tx<nb_rx)) {
-            for(uint16_t b=nb_tx; b<nb_rx; ++b)
-                rte_pktmbuf_free(bufs_rx[b]);
-        }
+        if(unlikely(nb_tx<nb_rx))
+            for(uint16_t i=nb_tx; i<nb_rx; ++i)
+                rte_pktmbuf_free(bufs_rx[i]);
     }
+
+    printf("[fw_ingress] stopped\n");
+    return 0;
 }
 
-static int tap_tx(__rte_unused void *arg) {
+static int fw_egress(__rte_unused void *arg) {
     struct rte_mbuf *bufs_rx[BURST_SIZE];
 
     while(running) {
-        const uint16_t nb_rx = rte_eth_rx_burst(tap_port_id, 0, bufs_rx, BURST_SIZE);
+        const uint16_t nb_rx = rte_kni_rx_burst(kni, bufs_rx, BURST_SIZE);
 
         if(unlikely(nb_rx==0))
             continue;
 
         const uint16_t nb_tx = rte_eth_tx_burst(trunk_port_id, 0, bufs_rx, nb_rx);
 
-        if(unlikely(nb_tx<nb_rx)) {
-            for(uint16_t b=nb_tx; b<nb_rx; ++b)
-                rte_pktmbuf_free(bufs_rx[b]);
-        }
+        if(unlikely(nb_tx<nb_rx))
+            for(uint16_t i=nb_tx; i<nb_rx; ++i)
+                rte_pktmbuf_free(bufs_rx[i]);
     }
 
+    printf("[fw_egress] stopped\n");
     return 0;
 }
 
-static uint8_t find_tap_trunk_devs(uint16_t *tap_id, uint16_t *trunk_id) {
-    struct rte_eth_dev_info dev_info;
-    uint8_t found_ports=0, avail_eths=rte_eth_dev_count_avail();
-
-    for(uint32_t id=0; id<avail_eths&&found_ports!=3; ++id) {
-        rte_eth_dev_info_get(id, &dev_info);
-        if(strcmp(dev_info.driver_name, "net_tap")==0&&!(found_ports&1)) {
-            *tap_id=id;
-            found_ports|=1;
-        } else if((~found_ports)&2) {
-            *trunk_id=id;
-            found_ports|=2;
-        }
+static __rte_noreturn void poll_handle_requests(void) {
+    for(;;) {
+        if(running)	rte_kni_handle_request(kni);
+        usleep(500);
     }
-
-    return found_ports!=3;
 }
 
 int main(int ac, char *as[]) {
@@ -118,7 +121,6 @@ int main(int ac, char *as[]) {
 
     signal(SIGINT, exit_handler);
     signal(SIGKILL, exit_handler);
-    signal(SIGSEGV, exit_handler);
 
     int offset;
 
@@ -126,20 +128,26 @@ int main(int ac, char *as[]) {
         rte_exit(EXIT_FAILURE, "Error: could not init EAL.\n");
     ++offset;
 
-    uint16_t avail_eths;
-    struct rte_ether_addr tap_macaddr;
+    if(rte_kni_init(1)<0)
+        rte_exit(EXIT_FAILURE, "Error: could not init kni.\n");
 
-    if((avail_eths=rte_eth_dev_count_avail())<2)
+    uint16_t avail_eths;
+
+    if((avail_eths=rte_eth_dev_count_avail())<1)
         rte_exit(EXIT_FAILURE, "Error: not enough devices available.\n");
 
-    if(find_tap_trunk_devs(&tap_port_id, &trunk_port_id))
-        rte_exit(EXIT_FAILURE, "Error: could not find a tap/trunk port.\n");
-
-    rte_eth_macaddr_get(tap_port_id, &tap_macaddr);
+    trunk_port_id=0;
 
     if(setup_memory(&ext_mem, &mpool_payload)) {
         rte_eal_cleanup();
         return EXIT_FAILURE;
+    }
+
+    puts("setup kni_port");
+    kni=setup_kni_port(trunk_port_id, 0, 0, mpool_payload);
+    puts("done setup kni_port");
+    if(kni==NULL) {
+        rte_exit(EXIT_FAILURE, "Error: could not init kni\n");
     }
 
 #define RX_OC(X) RTE_ETH_RX_OFFLOAD_##X
@@ -147,10 +155,7 @@ int main(int ac, char *as[]) {
 
     if(setup_port(trunk_port_id, &ext_mem, mpool_payload,
                   TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM),
-                  TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM))
-            |setup_port(tap_port_id, &ext_mem, mpool_payload,
-                        TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM),
-                        TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM))) {
+                  TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM))) {
         rte_eal_cleanup();
         return EXIT_FAILURE;
     }
@@ -158,11 +163,17 @@ int main(int ac, char *as[]) {
 #undef RX_OC
 #undef TX_OC
 
+    puts("done setting up trunk port");
+
     rte_eal_wait_lcore(1);
-    rte_eal_remote_launch(tap_tx, NULL, 1);
+    rte_eal_remote_launch(fw_egress, NULL, 1);
 
-    plain_fwd(&tap_macaddr);
+    rte_eal_wait_lcore(2);
+    rte_eal_remote_launch(fw_ingress, NULL, 2);
 
+    for(;;) sleep(10);
+
+    puts("HERE");
     rte_eal_cleanup();
     return EXIT_SUCCESS;
 }
