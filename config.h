@@ -13,6 +13,4 @@
 
 #define GPU_PAGE_SIZE (1U<<16)
 
-#define RTE_TABLE_VAL_DROP 1
-
 #endif
