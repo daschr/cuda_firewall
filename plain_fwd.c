@@ -76,7 +76,7 @@ static int print_stats(void *arg) {
     stats_buf[2]=stats[1];
 
     while(running) {
-        rte_delay_ms(1000);
+        rte_delay_ms(2000);
         gettimeofday(t+p, NULL);
         stats_buf[p]=stats[0];
         stats_buf[2+p]=stats[1];
@@ -124,7 +124,6 @@ static int plain_fwd(void *arg) {
 
 static int tap_tx(__rte_unused void *arg) {
     struct rte_mbuf *bufs_rx[BURST_SIZE];
-
     stats_t *stats=port_stats+1;
 
     while(running) {
@@ -196,11 +195,11 @@ int main(int ac, char *as[]) {
 #define RX_OC(X) RTE_ETH_RX_OFFLOAD_##X
 #define TX_OC(X) RTE_ETH_TX_OFFLOAD_##X
 
-    if(setup_port(trunk_port_id, &ext_mem, mpool_payload,
-                  TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM),
+    if(setup_port(trunk_port_id, &ext_mem, mpool_payload, 1, 1,
+                  RX_OC(IPV4_CKSUM)|RX_OC(TCP_CKSUM)|RX_OC(UDP_CKSUM),
                   TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM))
-            |setup_port(tap_port_id, &ext_mem, mpool_payload,
-                        TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM),
+            |setup_port(tap_port_id, &ext_mem, mpool_payload, 1, 1,
+                        RX_OC(IPV4_CKSUM)|RX_OC(TCP_CKSUM)|RX_OC(UDP_CKSUM),
                         TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM))) {
         rte_eal_cleanup();
         return EXIT_FAILURE;
@@ -213,7 +212,6 @@ int main(int ac, char *as[]) {
     memset(port_stats, 0, sizeof(stats_t)*2);
 
     unsigned int coreid=rte_get_next_lcore(rte_get_main_lcore(), 1, 1);
-
     rte_eal_remote_launch(tap_tx, NULL, coreid);
 
     coreid=rte_get_next_lcore(coreid, 1, 1);
