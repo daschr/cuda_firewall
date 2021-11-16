@@ -15,13 +15,25 @@ extern "C" {
 #include <rte_memcpy.h>
 #include <rte_eal.h>
 #include <rte_launch.h>
+#include <rte_atomic.h>
+#include <rte_cycles.h>
+#include <rte_prefetch.h>
+#include <rte_lcore.h>
 #include <rte_per_lcore.h>
 #include <rte_branch_prediction.h>
+#include <rte_interrupts.h>
+#include <rte_random.h>
+#include <rte_debug.h>
 #include <rte_ether.h>
 #include <rte_ethdev.h>
 #include <rte_mempool.h>
 #include <rte_mbuf.h>
+#include <rte_metrics.h>
+#include <rte_bitrate.h>
+#include <rte_latencystats.h>
 #include <rte_kni.h>
+
+
 
 #include <cuda_runtime.h>
 
@@ -29,6 +41,8 @@ extern "C" {
 #include "offload_capas.h"
 
 #define KNI_FIFO_COUNT_MAX 1024
+
+extern volatile uint8_t pausing;
 
 static inline void check_error(cudaError_t e, const char *file, int line) {
     if(e != cudaSuccess) {
@@ -47,22 +61,8 @@ int setup_memory(struct rte_pktmbuf_extmem *ext_mem, struct rte_mempool **mpool)
 
     memset(ext_mem, 0, sizeof(struct rte_pktmbuf_extmem));
 
-    ext_mem->elt_size= DEFAULT_MBUF_DATAROOM + RTE_PKTMBUF_HEADROOM;
-    ext_mem->buf_len= RTE_ALIGN_CEIL(DEFAULT_NB_MBUF * ext_mem->elt_size, GPU_PAGE_SIZE);
-    ext_mem->buf_iova=RTE_BAD_IOVA;
-    ext_mem->buf_ptr = rte_malloc("extmem", ext_mem->buf_len, 0);
-    rte_extmem_register(ext_mem->buf_ptr, ext_mem->buf_len, NULL, ext_mem->buf_iova, GPU_PAGE_SIZE);
-    CHECK(cudaHostRegister(ext_mem->buf_ptr, ext_mem->buf_len, cudaHostRegisterMapped));
-    void *buf_ptr_dev;
-    CHECK(cudaHostGetDevicePointer(&buf_ptr_dev, ext_mem->buf_ptr, 0));
-    if(ext_mem->buf_ptr != buf_ptr_dev) {
-        fprintf(stderr, "could not create external memory\next_mem.buf_ptr!=buf_ptr_dev\n");
-        return 1;
-    }
-
-    *mpool=rte_pktmbuf_pool_create_extbuf("payload_mpool", DEFAULT_NB_MBUF,
-                                          0, 0, ext_mem->elt_size,
-                                          rte_socket_id(), ext_mem, 1);
+    *mpool=rte_pktmbuf_pool_create("payload_mpool", DEFAULT_NB_MBUF,
+                                   0, 0, DEFAULT_MBUF_DATAROOM+RTE_PKTMBUF_HEADROOM, rte_socket_id());
 
     if(!*mpool) {
         fprintf(stderr, "Error: could not create mempool from external memory\n");
@@ -72,20 +72,67 @@ int setup_memory(struct rte_pktmbuf_extmem *ext_mem, struct rte_mempool **mpool)
     return 0;
 }
 
+static int kni_op_config_network_if(uint16_t port_id, uint8_t if_up) {
+    int r;
+    if(!rte_eth_dev_is_valid_port(port_id)) {
+        fprintf(stderr, "[config_network_if] invalid port: %u\n", port_id);
+        return -EINVAL;
+    }
+
+    pausing=1;
+    rte_delay_ms(100);
+
+    printf("[config_network_if] set port %u %s\n", port_id, if_up?"UP":"DOWN");
+
+    switch(if_up) {
+    case 1:
+        r=rte_eth_dev_start(port_id);
+        break;
+    case 0:
+    default:
+        r=rte_eth_dev_stop(port_id);
+    }
+
+    pausing=0;
+
+    if(r<0)
+        fprintf(stderr, "[config_network_if] failed to configure port %u\n", port_id);
+
+    return r;
+}
+
+static int kni_op_config_mac_address(uint16_t port_id, uint8_t *mac_addr) {
+    int r=0;
+    if(!rte_eth_dev_is_valid_port(port_id)) {
+        fprintf(stderr, "[config_mac_address] invalid port: %u\n", port_id);
+        return -EINVAL;
+    }
+
+    char buf[RTE_ETHER_ADDR_FMT_SIZE];
+    rte_ether_format_addr(buf, RTE_ETHER_ADDR_FMT_SIZE, (struct rte_ether_addr *) mac_addr);
+    printf("[config_mac_addr] new mac for port %u: %s\n", port_id, buf);
+
+    if((r=rte_eth_dev_default_mac_addr_set(port_id, (struct rte_ether_addr *) mac_addr))<0)
+        fprintf(stderr, "[config_mac_address] failed setting mac!\n");
+
+    return r;
+}
+
 struct rte_kni *setup_kni_port(uint16_t port_id, uint32_t core_id, struct rte_mempool *mpool) {
     int r;
     struct rte_kni_conf conf;
     struct rte_kni_ops ops;
 
-    memset(&ops, 0, sizeof(struct rte_kni_ops));
     memset(&conf, 0, sizeof(struct rte_kni_conf));
 
     ops.port_id=port_id;
+    ops.config_network_if=kni_op_config_network_if;
+    ops.config_mac_address=kni_op_config_mac_address;
 
     strcpy(conf.name, FW_IFACE_NAME);
     conf.core_id=core_id;
     conf.group_id=port_id;
-    conf.force_bind=0;
+    conf.force_bind=1;
     conf.mbuf_size=DEFAULT_MBUF_DATAROOM;
 
     struct rte_eth_dev_info dev_info;
@@ -160,7 +207,7 @@ int setup_port(uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte_
 
     CHECK_R((r=rte_eth_rx_queue_setup(port_id, 0, DEFAULT_NB_RX_DESC, rte_eth_dev_socket_id(0), NULL, mpool))<0);
 
-    rte_dev_dma_map(dev_info.device, ext_mem->buf_ptr, ext_mem->buf_iova, ext_mem->buf_len);
+//    rte_dev_dma_map(dev_info.device, ext_mem->buf_ptr, ext_mem->buf_iova, ext_mem->buf_len);
 
     CHECK_R((r=rte_eth_dev_start(port_id))<0);
 
