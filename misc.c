@@ -49,8 +49,9 @@ int setup_memory(struct rte_pktmbuf_extmem *ext_mem, struct rte_mempool **mpool)
 
     ext_mem->elt_size= DEFAULT_MBUF_DATAROOM + RTE_PKTMBUF_HEADROOM;
     ext_mem->buf_len= RTE_ALIGN_CEIL(DEFAULT_NB_MBUF * ext_mem->elt_size, GPU_PAGE_SIZE);
+    ext_mem->buf_iova=RTE_BAD_IOVA;
     ext_mem->buf_ptr = rte_malloc("extmem", ext_mem->buf_len, 0);
-
+    rte_extmem_register(ext_mem->buf_ptr, ext_mem->buf_len, NULL, ext_mem->buf_iova, GPU_PAGE_SIZE);
     CHECK(cudaHostRegister(ext_mem->buf_ptr, ext_mem->buf_len, cudaHostRegisterMapped));
     void *buf_ptr_dev;
     CHECK(cudaHostGetDevicePointer(&buf_ptr_dev, ext_mem->buf_ptr, 0));
@@ -71,7 +72,7 @@ int setup_memory(struct rte_pktmbuf_extmem *ext_mem, struct rte_mempool **mpool)
     return 0;
 }
 
-struct rte_kni *setup_kni_port(uint16_t port_id, uint32_t core_id, uint16_t group_id, struct rte_mempool *mpool) {
+struct rte_kni *setup_kni_port(uint16_t port_id, uint32_t core_id, struct rte_mempool *mpool) {
     int r;
     struct rte_kni_conf conf;
     struct rte_kni_ops ops;
@@ -130,16 +131,14 @@ int setup_port(uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte_
     print_tx_offload_capas(dev_info.tx_offload_capa);
     printf("\n");
 
-#define RX_OC(X) RTE_ETH_RX_OFFLOAD_##X
-#define TX_OC(X) RTE_ETH_TX_OFFLOAD_##X
+    port_conf.rxmode.offloads=rx_offload_capas&dev_info.rx_offload_capa;
+    port_conf.txmode.offloads=tx_offload_capas&dev_info.tx_offload_capa;
 
-    port_conf.rxmode.offloads=rx_offload_capas;
-//RX_OC(IPV4_CKSUM)|RX_OC(TCP_CKSUM)|RX_OC(UDP_CKSUM); //dev_info.rx_offload_capa;
-    port_conf.txmode.offloads=tx_offload_capas;
-//TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM);//|TX_OC(TCP_TSO); //dev_info.tx_offload_capa;
+    printf("ENABLED RX CAPABILITIES:\n");
+    print_rx_offload_capas(port_conf.rxmode.offloads);
 
-#undef RX_OC
-#undef TX_OC
+    printf("ENABLED TX CAPABILITIES:\n");
+    print_tx_offload_capas(port_conf.txmode.offloads);
 
     if(dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE) {
         printf("enabling fast free\n");
