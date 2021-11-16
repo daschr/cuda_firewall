@@ -105,8 +105,9 @@ static int plain_fwd(void *arg) {
 
         if(unlikely(nb_rx==0))
             continue;
+
         for(uint16_t i=0; i<nb_rx; ++i)
-            rte_memcpy(&(rte_pktmbuf_mtod(bufs_rx[i], struct rte_ether_hdr *)->dst_addr), tap_macaddr, 6);
+            rte_ether_addr_copy(tap_macaddr, &(rte_pktmbuf_mtod(bufs_rx[i], struct rte_ether_hdr *)->dst_addr));
 
         const uint16_t nb_tx = rte_eth_tx_burst(tap_port_id, 0, bufs_rx, nb_rx);
 
