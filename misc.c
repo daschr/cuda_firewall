@@ -42,7 +42,7 @@ extern "C" {
 
 #define KNI_FIFO_COUNT_MAX 1024
 
-extern volatile uint8_t pausing;
+extern uint8_t pausing, if_down;
 
 static inline void check_error(cudaError_t e, const char *file, int line) {
     if(e != cudaSuccess) {
@@ -62,7 +62,7 @@ int setup_memory(struct rte_pktmbuf_extmem *ext_mem, struct rte_mempool **mpool)
     memset(ext_mem, 0, sizeof(struct rte_pktmbuf_extmem));
 
     *mpool=rte_pktmbuf_pool_create("payload_mpool", DEFAULT_NB_MBUF,
-                                   0, 0, DEFAULT_MBUF_DATAROOM+RTE_PKTMBUF_HEADROOM, rte_socket_id());
+                                   BURST_SIZE, 0, DEFAULT_MBUF_DATAROOM+RTE_PKTMBUF_HEADROOM, rte_socket_id());
 
     if(!*mpool) {
         fprintf(stderr, "Error: could not create mempool from external memory\n");
@@ -79,21 +79,24 @@ static int kni_op_config_network_if(uint16_t port_id, uint8_t if_up) {
         return -EINVAL;
     }
 
-    pausing=1;
+    __atomic_store_n(&pausing, 1, __ATOMIC_RELAXED);
     rte_delay_ms(100);
 
     printf("[config_network_if] set port %u %s\n", port_id, if_up?"UP":"DOWN");
 
     switch(if_up) {
     case 1:
+        rte_eth_dev_stop(port_id);
         r=rte_eth_dev_start(port_id);
+        if(r>=0) __atomic_store_n(&if_down, 0, __ATOMIC_RELAXED);
         break;
     case 0:
     default:
         r=rte_eth_dev_stop(port_id);
+        if(r>=0) __atomic_store_n(&if_down, 1, __ATOMIC_RELAXED);
     }
 
-    pausing=0;
+    __atomic_store_n(&pausing, 0, __ATOMIC_RELAXED);
 
     if(r<0)
         fprintf(stderr, "[config_network_if] failed to configure port %u\n", port_id);
@@ -194,6 +197,9 @@ int setup_port(uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte_
 
     port_conf.rx_adv_conf.rss_conf.rss_hf&=dev_info.flow_type_rss_offloads;
 
+    printf("[%u] min_rx_bufsize: %u max_rx_pktlen: %u\n", port_id,  dev_info.min_rx_bufsize, dev_info.max_rx_pktlen);
+    printf("[%u] max_rx_queues: %u max_tx_queues: %u\n", port_id,  dev_info.max_rx_queues, dev_info.max_tx_queues);
+
     struct rte_flow_error flow_error;
     if(rte_flow_flush(port_id, &flow_error))
         rte_exit(EXIT_FAILURE, "Error: could not flush flow rules: %s\n", flow_error.message);
@@ -203,9 +209,13 @@ int setup_port(uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte_
     struct rte_eth_txconf txconf=dev_info.default_txconf;
     txconf.offloads=port_conf.txmode.offloads;
 
+    struct rte_eth_rxconf rxconf=dev_info.default_rxconf;
+    rxconf.offloads=port_conf.rxmode.offloads;
+
+
     CHECK_R((r=rte_eth_tx_queue_setup(port_id, 0, DEFAULT_NB_TX_DESC, rte_eth_dev_socket_id(0), &txconf))<0);
 
-    CHECK_R((r=rte_eth_rx_queue_setup(port_id, 0, DEFAULT_NB_RX_DESC, rte_eth_dev_socket_id(0), NULL, mpool))<0);
+    CHECK_R((r=rte_eth_rx_queue_setup(port_id, 0, DEFAULT_NB_RX_DESC, rte_eth_dev_socket_id(0), &rxconf, mpool))<0);
 
 //    rte_dev_dma_map(dev_info.device, ext_mem->buf_ptr, ext_mem->buf_iova, ext_mem->buf_len);
 

@@ -42,7 +42,7 @@ struct rte_mempool *mpool_payload;
 uint16_t tap_port_id, trunk_port_id;
 struct rte_kni *kni;
 
-volatile uint8_t running, pausing;
+uint8_t running, pausing, if_down;
 
 void exit_handler(int e) {
     running=0;
@@ -66,8 +66,9 @@ static int fw_ingress(__rte_unused void *arg) {
     struct rte_mbuf *bufs_rx[BURST_SIZE];
     printf("[fw_ingress] lcore_id: %u\n", rte_lcore_id());
 
-    while(running) {
-        if(pausing) continue;
+    while(__atomic_load_n(&running, __ATOMIC_RELAXED)) {
+        if(unlikely(__atomic_load_n(&pausing, __ATOMIC_RELAXED)==1)) continue;
+        if(unlikely(__atomic_load_n(&if_down, __ATOMIC_RELAXED)==1)) continue;
 
         const unsigned nb_rx = (unsigned) rte_eth_rx_burst(trunk_port_id, 0, bufs_rx, BURST_SIZE);
 
@@ -90,8 +91,10 @@ static int fw_egress(__rte_unused void *arg) {
 
     printf("[fw_egress] lcore_id: %u\n", rte_lcore_id());
 
-    while(running) {
-        if(pausing) continue;
+    while(unlikely(__atomic_load_n(&running, __ATOMIC_RELAXED))) {
+        if(unlikely(__atomic_load_n(&pausing, __ATOMIC_RELAXED)==1)) continue;
+        if(unlikely(__atomic_load_n(&if_down, __ATOMIC_RELAXED)==1)) continue;
+
         const unsigned nb_rx = rte_kni_rx_burst(kni, bufs_rx, BURST_SIZE);
 
         if(unlikely(nb_rx==0))
@@ -109,9 +112,9 @@ static int fw_egress(__rte_unused void *arg) {
 }
 
 static int poll_handle_requests(void *arg) {
-    while(running) {
+    while(__atomic_load_n(&running, __ATOMIC_RELAXED)) {
         rte_kni_handle_request(kni);
-        rte_delay_ms(500);
+        rte_delay_ms(100);
     }
     return 0;
 }
@@ -119,6 +122,7 @@ static int poll_handle_requests(void *arg) {
 int main(int ac, char *as[]) {
     running=1;
     pausing=1;
+    if_down=1;
 
     signal(SIGINT, exit_handler);
     signal(SIGKILL, exit_handler);
@@ -144,10 +148,8 @@ int main(int ac, char *as[]) {
         return EXIT_FAILURE;
     }
 
-
 #define RX_OC(X) RTE_ETH_RX_OFFLOAD_##X
 #define TX_OC(X) RTE_ETH_TX_OFFLOAD_##X
-
     if(setup_port(trunk_port_id, &ext_mem, mpool_payload,
                   RX_OC(IPV4_CKSUM)|RX_OC(TCP_CKSUM)|RX_OC(UDP_CKSUM),
                   TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM))) {
@@ -161,9 +163,11 @@ int main(int ac, char *as[]) {
 
     puts("setup kni_port");
     kni=setup_kni_port(trunk_port_id, KNI_LCORE, mpool_payload);
-    puts("done setup kni_port");
     if(kni==NULL)
         rte_exit(EXIT_FAILURE, "Error: could not init kni\n");
+
+    rte_kni_update_link(kni, 1);
+    puts("done setup kni_port");
 
     unsigned int coreid=rte_get_next_lcore(rte_get_main_lcore(), 1, 1);
     rte_eal_remote_launch(fw_egress, NULL, coreid);
@@ -176,8 +180,6 @@ int main(int ac, char *as[]) {
 
     RTE_LCORE_FOREACH_WORKER(coreid)
     rte_eal_wait_lcore(coreid);
-
-    puts("HERE");
 
     rte_eal_cleanup();
     return EXIT_SUCCESS;
