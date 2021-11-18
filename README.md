@@ -69,7 +69,7 @@ index fc8f0e7b5a..51b3ce173c 100644
 
 # usage
 
-* build dpdk (>=21.08)
+* build dpdk (>=21.11): `meson build -Denable_kmods=true`
 * `make all`
 * `insmod <path to you kni module>`
 * run:
