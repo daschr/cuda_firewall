@@ -26,6 +26,8 @@ extern "C" {
 #include "config.h"
 #include "offload_capas.h"
 
+#define USE_EXT_MEM
+
 static inline void check_error(cudaError_t e, const char *file, int line) {
     if(e != cudaSuccess) {
         fprintf(stderr, "[ERROR] %s in %s (line %d)\n", cudaGetErrorString(e), file, line);
@@ -35,26 +37,33 @@ static inline void check_error(cudaError_t e, const char *file, int line) {
 #define CHECK(X) (check_error(X, __FILE__, __LINE__))
 
 
-int setup_memory(struct rte_pktmbuf_extmem *ext_mem, struct rte_mempool **mpool_payload) {
-    /*    memset(ext_mem, 0, sizeof(struct rte_pktmbuf_extmem));
+int setup_memory(struct rte_pktmbuf_extmem *ext_mem, struct rte_mempool **mpool) {
 
-        ext_mem->elt_size= DEFAULT_MBUF_DATAROOM + RTE_PKTMBUF_HEADROOM;
-        ext_mem->buf_len= RTE_ALIGN_CEIL(DEFAULT_NB_MBUF * ext_mem->elt_size, GPU_PAGE_SIZE);
-        ext_mem->buf_ptr = rte_malloc("extmem", ext_mem->buf_len, 0);
-        CHECK(cudaHostRegister(ext_mem->buf_ptr, ext_mem->buf_len, cudaHostRegisterMapped));
-        void *buf_ptr_dev;
-        CHECK(cudaHostGetDevicePointer(&buf_ptr_dev, ext_mem->buf_ptr, 0));
-        if(ext_mem->buf_ptr != buf_ptr_dev) {
-            fprintf(stderr, "could not create external memory\next_mem.buf_ptr!=buf_ptr_dev\n");
-            return 1;
-        }
+#ifdef USE_EXT_MEM
+    memset(ext_mem, 0, sizeof(struct rte_pktmbuf_extmem));
 
-        *mpool_payload=rte_pktmbuf_pool_create_extbuf("payload_mpool", DEFAULT_NB_MBUF,
-                       RTE_MEMPOOL_CACHE_MAX_SIZE, 0, ext_mem->elt_size,
-                       rte_socket_id(), ext_mem, 1);
-    */
-    *mpool_payload=rte_pktmbuf_pool_create("payload_mpool", DEFAULT_NB_MBUF, RTE_MEMPOOL_CACHE_MAX_SIZE, 0, DEFAULT_MBUF_DATAROOM+RTE_PKTMBUF_HEADROOM, rte_socket_id());
-    if(!*mpool_payload) {
+    ext_mem->elt_size= DEFAULT_MBUF_DATAROOM + RTE_PKTMBUF_HEADROOM;
+    ext_mem->buf_len= RTE_ALIGN_CEIL(DEFAULT_NB_MBUF * ext_mem->elt_size, GPU_PAGE_SIZE);
+    ext_mem->buf_iova=RTE_BAD_IOVA;
+    ext_mem->buf_ptr = rte_malloc("extmem", ext_mem->buf_len, 0);
+
+    CHECK(cudaHostRegister(ext_mem->buf_ptr, ext_mem->buf_len, cudaHostRegisterMapped));
+    void *buf_ptr_dev;
+    CHECK(cudaHostGetDevicePointer(&buf_ptr_dev, ext_mem->buf_ptr, 0));
+    if(ext_mem->buf_ptr != buf_ptr_dev) {
+        fprintf(stderr, "could not create external memory\next_mem.buf_ptr!=buf_ptr_dev\n");
+        return 1;
+    }
+
+    *mpool=rte_pktmbuf_pool_create_extbuf("payload_mpool", DEFAULT_NB_MBUF,
+                                          RTE_MEMPOOL_CACHE_MAX_SIZE, 0, ext_mem->elt_size,
+                                          rte_socket_id(), ext_mem, 1);
+#else
+
+    *mpool=rte_pktmbuf_pool_create("payload_mpool", DEFAULT_NB_MBUF, RTE_MEMPOOL_CACHE_MAX_SIZE, 0, DEFAULT_MBUF_DATAROOM+RTE_PKTMBUF_HEADROOM, rte_socket_id());
+#endif
+
+    if(!*mpool) {
         fprintf(stderr, "Error: could not create mempool from external memory\n");
         return 1;
     }
@@ -127,7 +136,9 @@ int setup_port(	uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte
     for(uint i=0; i<nb_rx_queues; ++i)
         CHECK_R((r=rte_eth_rx_queue_setup(port_id, i, DEFAULT_NB_RX_DESC, rte_eth_dev_socket_id(0), &rxconf, mpool_payload))<0);
 
-    //rte_dev_dma_map(dev_info.device, ext_mem->buf_ptr, ext_mem->buf_iova, ext_mem->buf_len);
+#ifdef USE_EXT_MEM
+    rte_dev_dma_map(dev_info.device, ext_mem->buf_ptr, ext_mem->buf_iova, ext_mem->buf_len);
+#endif
 
     CHECK_R((r=rte_eth_dev_start(port_id))<0);
 
