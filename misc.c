@@ -33,14 +33,12 @@ extern "C" {
 #include <rte_latencystats.h>
 #include <rte_kni.h>
 
-
-
 #include <cuda_runtime.h>
 
 #include "config.h"
 #include "offload_capas.h"
 
-#define KNI_FIFO_COUNT_MAX 1024
+#define KNI_FIFO_COUNT_MAX 2048
 
 extern uint8_t pausing, if_down;
 
@@ -59,10 +57,27 @@ int setup_memory(struct rte_pktmbuf_extmem *ext_mem, struct rte_mempool **mpool)
         return 1;
     }
 
+#ifdef USE_EXT_MEM
     memset(ext_mem, 0, sizeof(struct rte_pktmbuf_extmem));
+    ext_mem->elt_size= DEFAULT_MBUF_DATAROOM + RTE_PKTMBUF_HEADROOM;
+    ext_mem->buf_len= RTE_ALIGN_CEIL(DEFAULT_NB_MBUF * ext_mem->elt_size, GPU_PAGE_SIZE);
+    ext_mem->buf_iova=RTE_IOVA_VA;
+    ext_mem->buf_ptr = rte_malloc("extmem", ext_mem->buf_len, 0);
+    CHECK(cudaHostRegister(ext_mem->buf_ptr, ext_mem->buf_len, cudaHostRegisterMapped));
+    void *buf_ptr_dev;
+    CHECK(cudaHostGetDevicePointer(&buf_ptr_dev, ext_mem->buf_ptr, 0));
+    if(ext_mem->buf_ptr != buf_ptr_dev) {
+        fprintf(stderr, "could not create external memory\next_mem.buf_ptr!=buf_ptr_dev\n");
+        return 1;
+    }
 
+    *mpool=rte_pktmbuf_pool_create_extbuf("payload_mpool", DEFAULT_NB_MBUF,
+                                          0, 0, ext_mem->elt_size, rte_socket_id(), ext_mem, 1);
+
+#else
     *mpool=rte_pktmbuf_pool_create("payload_mpool", DEFAULT_NB_MBUF,
                                    BURST_SIZE, 0, DEFAULT_MBUF_DATAROOM+RTE_PKTMBUF_HEADROOM, rte_socket_id());
+#endif
 
     if(!*mpool) {
         fprintf(stderr, "Error: could not create mempool from external memory\n");
@@ -217,7 +232,10 @@ int setup_port(uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte_
 
     CHECK_R((r=rte_eth_rx_queue_setup(port_id, 0, DEFAULT_NB_RX_DESC, rte_eth_dev_socket_id(0), &rxconf, mpool))<0);
 
-//    rte_dev_dma_map(dev_info.device, ext_mem->buf_ptr, ext_mem->buf_iova, ext_mem->buf_len);
+#ifdef USE_EXT_MEM
+    if(rte_dev_dma_map(dev_info.device, ext_mem->buf_ptr, ext_mem->buf_iova, ext_mem->buf_len))
+        fprintf(stderr, "could not dma map memory: %s\n", rte_strerror(rte_errno));
+#endif
 
     CHECK_R((r=rte_eth_dev_start(port_id))<0);
 
