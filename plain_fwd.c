@@ -42,17 +42,16 @@ extern "C" {
 struct rte_pktmbuf_extmem ext_mem;
 struct rte_mempool *mpool_payload;
 uint16_t tap_port_id, trunk_port_id;
+struct rte_ether_addr tap_macaddr;
 stats_t *port_stats=NULL;
-volatile uint8_t running;
+uint8_t running;
 
 void exit_handler(int e) {
-    running=0;
+    __atomic_store_n(&running, 0, __ATOMIC_RELAXED);
 
     unsigned int i;
-    RTE_LCORE_FOREACH_WORKER(i) {
-        printf("[exit_handler] waiting for lcore %d...\n", i);
-        rte_eal_wait_lcore(i);
-    }
+    RTE_LCORE_FOREACH_WORKER(i)
+    rte_eal_wait_lcore(i);
 
     rte_free(port_stats);
     rte_eal_cleanup();
@@ -75,11 +74,17 @@ static int print_stats(void *arg) {
     stats_buf[0]=stats[0];
     stats_buf[2]=stats[1];
 
-    while(running) {
-        rte_delay_ms(2000);
+    while(__atomic_load_n(&running, __ATOMIC_RELAXED)) {
+        rte_delay_ms(1000);
         gettimeofday(t+p, NULL);
-        stats_buf[p]=stats[0];
-        stats_buf[2+p]=stats[1];
+
+#define LOAD(X, Y) __atomic_load(&(X), &(Y), __ATOMIC_RELAXED)
+        LOAD(stats[0].pkts_in, stats_buf[p].pkts_in);
+        LOAD(stats[0].pkts_out, stats_buf[p].pkts_out);
+        LOAD(stats[1].pkts_in, stats_buf[2+p].pkts_in);
+        LOAD(stats[1].pkts_out, stats_buf[2+p].pkts_out);
+#undef LOAD
+
         ts[p]=1000000*t[p].tv_sec+t[p].tv_usec;
         ts_d=(double) (ts[p]-ts[p^1])/1000000.0;
 
@@ -96,23 +101,25 @@ static int print_stats(void *arg) {
 }
 
 static int plain_fwd(void *arg) {
-    struct rte_ether_addr *tap_macaddr=(struct rte_ether_addr *) arg;
+    const uint16_t queue_id=*((uint16_t *) arg);
     struct rte_mbuf *bufs_rx[BURST_SIZE];
     stats_t *stats=port_stats;
 
-    while(running) {
-        const uint16_t nb_rx = rte_eth_rx_burst(trunk_port_id, 0, bufs_rx, BURST_SIZE);
+    printf("[plain_fwd] lcore_id: %u queue_id: %u\n", rte_lcore_id(), queue_id);
+
+    while(__atomic_load_n(&running, __ATOMIC_RELAXED)) {
+        const uint16_t nb_rx = rte_eth_rx_burst(trunk_port_id, queue_id, bufs_rx, BURST_SIZE);
 
         if(unlikely(nb_rx==0))
             continue;
 
         for(uint16_t i=0; i<nb_rx; ++i)
-            rte_ether_addr_copy(tap_macaddr, &(rte_pktmbuf_mtod(bufs_rx[i], struct rte_ether_hdr *)->dst_addr));
+            rte_ether_addr_copy(&tap_macaddr, &(rte_pktmbuf_mtod(bufs_rx[i], struct rte_ether_hdr *)->dst_addr));
 
-        const uint16_t nb_tx = rte_eth_tx_burst(tap_port_id, 0, bufs_rx, nb_rx);
+        const uint16_t nb_tx = rte_eth_tx_burst(tap_port_id, queue_id, bufs_rx, nb_rx);
 
-        stats->pkts_in+=nb_rx;
-        stats->pkts_out+=nb_tx;
+        __atomic_add_fetch(&stats->pkts_in, nb_rx, __ATOMIC_RELEASE);
+        __atomic_add_fetch(&stats->pkts_out, nb_tx, __ATOMIC_RELEASE);
 
         if(unlikely(nb_tx<nb_rx)) {
             for(uint16_t b=nb_tx; b<nb_rx; ++b)
@@ -123,20 +130,23 @@ static int plain_fwd(void *arg) {
     return 0;
 }
 
-static int tap_tx(__rte_unused void *arg) {
+static int tap_tx(void *arg) {
+    const uint16_t queue_id=*((uint16_t *) arg);
     struct rte_mbuf *bufs_rx[BURST_SIZE];
     stats_t *stats=port_stats+1;
 
-    while(running) {
-        const uint16_t nb_rx = rte_eth_rx_burst(tap_port_id, 0, bufs_rx, BURST_SIZE);
+    printf("[tap_tx] lcore_id: %u queue_id: %u\n", rte_lcore_id(), queue_id);
+
+    while(__atomic_load_n(&running, __ATOMIC_RELAXED)) {
+        const uint16_t nb_rx = rte_eth_rx_burst(tap_port_id, queue_id, bufs_rx, BURST_SIZE);
 
         if(unlikely(nb_rx==0))
             continue;
 
-        const uint16_t nb_tx = rte_eth_tx_burst(trunk_port_id, 0, bufs_rx, nb_rx);
+        const uint16_t nb_tx = rte_eth_tx_burst(trunk_port_id, queue_id, bufs_rx, nb_rx);
 
-        stats->pkts_in+=nb_rx;
-        stats->pkts_out+=nb_tx;
+        __atomic_add_fetch(&stats->pkts_in, nb_rx, __ATOMIC_RELEASE);
+        __atomic_add_fetch(&stats->pkts_out, nb_tx, __ATOMIC_RELEASE);
 
         if(unlikely(nb_tx<nb_rx)) {
             for(uint16_t b=nb_tx; b<nb_rx; ++b)
@@ -178,7 +188,6 @@ int main(int ac, char *as[]) {
     ++offset;
 
     uint16_t avail_eths;
-    struct rte_ether_addr tap_macaddr;
 
     if((avail_eths=rte_eth_dev_count_avail())<2)
         rte_exit(EXIT_FAILURE, "Error: not enough devices available.\n");
@@ -196,10 +205,10 @@ int main(int ac, char *as[]) {
 #define RX_OC(X) RTE_ETH_RX_OFFLOAD_##X
 #define TX_OC(X) RTE_ETH_TX_OFFLOAD_##X
 
-    if(setup_port(trunk_port_id, &ext_mem, mpool_payload, 1, 1,
+    if(setup_port(trunk_port_id, &ext_mem, mpool_payload, DEFAULT_NB_QUEUES, DEFAULT_NB_QUEUES,
                   RX_OC(IPV4_CKSUM)|RX_OC(TCP_CKSUM)|RX_OC(UDP_CKSUM),
                   TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM))
-            |setup_port(tap_port_id, &ext_mem, mpool_payload, 1, 1,
+            |setup_port(tap_port_id, &ext_mem, mpool_payload, DEFAULT_NB_QUEUES, DEFAULT_NB_QUEUES,
                         RX_OC(IPV4_CKSUM)|RX_OC(TCP_CKSUM)|RX_OC(UDP_CKSUM),
                         TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM))) {
         rte_eal_cleanup();
@@ -213,13 +222,15 @@ int main(int ac, char *as[]) {
     memset(port_stats, 0, sizeof(stats_t)*2);
 
     unsigned int coreid=rte_get_next_lcore(rte_get_main_lcore(), 1, 1);
-    rte_eal_remote_launch(tap_tx, NULL, coreid);
-
-    coreid=rte_get_next_lcore(coreid, 1, 1);
-    rte_eal_remote_launch(plain_fwd, &tap_macaddr, coreid);
-
-    coreid=rte_get_next_lcore(coreid, 1, 1);
     rte_eal_remote_launch(print_stats, port_stats, coreid);
+
+    for(uint16_t i=0; i<DEFAULT_NB_QUEUES; ++i) {
+        coreid=rte_get_next_lcore(coreid, 1, 1);
+        rte_eal_remote_launch(tap_tx, &i, coreid);
+
+        coreid=rte_get_next_lcore(coreid, 1, 1);
+        rte_eal_remote_launch(plain_fwd, &i, coreid);
+    }
 
     RTE_LCORE_FOREACH_WORKER(coreid)
     rte_eal_wait_lcore(coreid);

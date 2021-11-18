@@ -119,9 +119,9 @@ int setup_port(	uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte
     rxconf.offloads=port_conf.rxmode.offloads;
 
     printf("[%u] rx_free_thresh: %u tx_free_thresh: %u\n", port_id, rxconf.rx_free_thresh, txconf.tx_free_thresh);
-	rxconf.rx_free_thresh=256;
-	txconf.tx_free_thresh=256;
-    for(uint i=0; i<nb_rx_queues; ++i)
+    rxconf.rx_free_thresh=256;
+    txconf.tx_free_thresh=256;
+    for(uint i=0; i<nb_tx_queues; ++i)
         CHECK_R((r=rte_eth_tx_queue_setup(port_id, i, DEFAULT_NB_TX_DESC, rte_eth_dev_socket_id(0), &txconf))<0);
 
     for(uint i=0; i<nb_rx_queues; ++i)
