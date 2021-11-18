@@ -4,7 +4,7 @@ Plain packet forwarder between NIC and a dpdk kni interface. Used for getting ap
 # current progress
 - [x] uses multiple queues (currently 2 by default)
 - [x] atomics
-- [x] stats
+- [ ] stats
 - [ ] external host pinned or internal membuf **NOTE:** seems currently not possible 
 
 # current stats*
