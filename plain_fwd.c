@@ -45,7 +45,7 @@ struct rte_kni *kni;
 uint8_t running, pausing, if_down;
 
 void exit_handler(int e) {
-    running=0;
+    __atomic_store_n(&running, 0, __ATOMIC_RELAXED);
     unsigned int i;
 
     RTE_LCORE_FOREACH_WORKER(i) {
