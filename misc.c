@@ -137,7 +137,8 @@ int setup_port(	uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte
         CHECK_R((r=rte_eth_rx_queue_setup(port_id, i, DEFAULT_NB_RX_DESC, rte_eth_dev_socket_id(0), &rxconf, mpool_payload))<0);
 
 #ifdef USE_EXT_MEM
-    rte_dev_dma_map(dev_info.device, ext_mem->buf_ptr, ext_mem->buf_iova, ext_mem->buf_len);
+    if(rte_dev_dma_map(dev_info.device, ext_mem->buf_ptr, ext_mem->buf_iova, ext_mem->buf_len))
+		fprintf(stderr, "Error while dma mapping: %s\n", rte_strerror(rte_errno));
 #endif
 
     CHECK_R((r=rte_eth_dev_start(port_id))<0);
