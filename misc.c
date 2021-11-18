@@ -26,7 +26,7 @@ extern "C" {
 #include "config.h"
 #include "offload_capas.h"
 
-#define USE_EXT_MEM
+#define USE_EXT_MEM 1
 
 static inline void check_error(cudaError_t e, const char *file, int line) {
     if(e != cudaSuccess) {
@@ -39,7 +39,7 @@ static inline void check_error(cudaError_t e, const char *file, int line) {
 
 int setup_memory(struct rte_pktmbuf_extmem *ext_mem, struct rte_mempool **mpool) {
 
-#ifdef USE_EXT_MEM
+#if USE_EXT_MEM
     memset(ext_mem, 0, sizeof(struct rte_pktmbuf_extmem));
 
     ext_mem->elt_size= DEFAULT_MBUF_DATAROOM + RTE_PKTMBUF_HEADROOM;
@@ -136,7 +136,7 @@ int setup_port(	uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte
     for(uint i=0; i<nb_rx_queues; ++i)
         CHECK_R((r=rte_eth_rx_queue_setup(port_id, i, DEFAULT_NB_RX_DESC, rte_eth_dev_socket_id(0), &rxconf, mpool_payload))<0);
 
-#ifdef USE_EXT_MEM
+#if USE_EXT_MEM
     if(rte_dev_dma_map(dev_info.device, ext_mem->buf_ptr, ext_mem->buf_iova, ext_mem->buf_len))
 		fprintf(stderr, "Error while dma mapping: %s\n", rte_strerror(rte_errno));
 #endif
