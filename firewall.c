@@ -66,7 +66,6 @@ void exit_handler(int e) {
 
     unsigned int i;
     RTE_LCORE_FOREACH_WORKER(i) {
-        printf("[exit_handler] waiting for lcore %d...\n", i);
         rte_eal_wait_lcore(i);
     }
 
@@ -75,8 +74,8 @@ void exit_handler(int e) {
     rte_table_bv_ops.f_free(table);
 
     rte_free(port_stats);
-    
-	rte_eal_cleanup();
+
+    rte_eal_cleanup();
 
     exit(EXIT_SUCCESS);
 }
