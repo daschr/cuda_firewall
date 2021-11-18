@@ -62,15 +62,16 @@ void exit_handler(int e) {
     exit(EXIT_SUCCESS);
 }
 
-static int fw_ingress(__rte_unused void *arg) {
+static int fw_ingress(void *arg) {
+    const uint16_t queue_id=*((uint16_t *) arg);
     struct rte_mbuf *bufs_rx[BURST_SIZE];
-    printf("[fw_ingress] lcore_id: %u\n", rte_lcore_id());
+    printf("[fw_ingress] lcore_id: %u queue_id: %u\n", rte_lcore_id(), queue_id);
 
     while(__atomic_load_n(&running, __ATOMIC_RELAXED)) {
         if(unlikely(__atomic_load_n(&pausing, __ATOMIC_RELAXED)==1)) continue;
         if(unlikely(__atomic_load_n(&if_down, __ATOMIC_RELAXED)==1)) continue;
 
-        const unsigned nb_rx = (unsigned) rte_eth_rx_burst(trunk_port_id, 0, bufs_rx, BURST_SIZE);
+        const unsigned nb_rx = (unsigned) rte_eth_rx_burst(trunk_port_id, queue_id, bufs_rx, BURST_SIZE);
 
         if(unlikely(nb_rx==0))
             continue;
@@ -86,10 +87,11 @@ static int fw_ingress(__rte_unused void *arg) {
     return 0;
 }
 
-static int fw_egress(__rte_unused void *arg) {
+static int fw_egress(void *arg) {
+    const uint16_t queue_id=*((uint16_t *) arg);
     struct rte_mbuf *bufs_rx[BURST_SIZE];
 
-    printf("[fw_egress] lcore_id: %u\n", rte_lcore_id());
+    printf("[fw_egress] lcore_id: %u queue_id: %u\n", rte_lcore_id(), queue_id);
 
     while(unlikely(__atomic_load_n(&running, __ATOMIC_RELAXED))) {
         if(unlikely(__atomic_load_n(&pausing, __ATOMIC_RELAXED)==1)) continue;
@@ -100,7 +102,7 @@ static int fw_egress(__rte_unused void *arg) {
         if(unlikely(nb_rx==0))
             continue;
 
-        const unsigned nb_tx = (unsigned) rte_eth_tx_burst(trunk_port_id, 0, bufs_rx, (uint16_t) nb_rx);
+        const unsigned nb_tx = (unsigned) rte_eth_tx_burst(trunk_port_id, queue_id, bufs_rx, (uint16_t) nb_rx);
 
         if(unlikely(nb_tx<nb_rx))
             for(uint16_t i=nb_tx; i<nb_rx; ++i)
@@ -150,7 +152,7 @@ int main(int ac, char *as[]) {
 
 #define RX_OC(X) RTE_ETH_RX_OFFLOAD_##X
 #define TX_OC(X) RTE_ETH_TX_OFFLOAD_##X
-    if(setup_port(trunk_port_id, &ext_mem, mpool_payload,
+    if(setup_port(trunk_port_id, &ext_mem, mpool_payload, DEFAULT_NB_RX_QUEUES, DEFAULT_NB_TX_QUEUES,
                   RX_OC(IPV4_CKSUM)|RX_OC(TCP_CKSUM)|RX_OC(UDP_CKSUM),
                   TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM))) {
         rte_eal_cleanup();
@@ -170,13 +172,17 @@ int main(int ac, char *as[]) {
     puts("done setup kni_port");
 
     unsigned int coreid=rte_get_next_lcore(rte_get_main_lcore(), 1, 1);
-    rte_eal_remote_launch(fw_egress, NULL, coreid);
-
-    coreid=rte_get_next_lcore(coreid, 1, 1);
-    rte_eal_remote_launch(fw_ingress, NULL, coreid);
-
-    coreid=rte_get_next_lcore(coreid, 1, 1);
     rte_eal_remote_launch(poll_handle_requests, NULL, coreid);
+
+    for(uint16_t i=0; i<DEFAULT_NB_TX_QUEUES; ++i) {
+        coreid=rte_get_next_lcore(coreid, 1, 1);
+        rte_eal_remote_launch(fw_egress, &i, coreid);
+    }
+
+    for(uint16_t i=0; i<DEFAULT_NB_RX_QUEUES; ++i) {
+        coreid=rte_get_next_lcore(coreid, 1, 1);
+        rte_eal_remote_launch(fw_ingress, &i, coreid);
+    }
 
     RTE_LCORE_FOREACH_WORKER(coreid)
     rte_eal_wait_lcore(coreid);

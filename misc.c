@@ -174,7 +174,8 @@ struct rte_kni *setup_kni_port(uint16_t port_id, uint32_t core_id, struct rte_me
 }
 
 #define CHECK_R(X) if(X){fprintf(stderr, "Error: " #X  " (r=%d)\n", r); return 1;}
-int setup_port(uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte_mempool *mpool, uint64_t rx_offload_capas, uint64_t tx_offload_capas) {
+int setup_port( uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte_mempool *mpool,
+                uint16_t nb_rx_queues, uint16_t nb_tx_queues, uint64_t rx_offload_capas, uint64_t tx_offload_capas) {
     struct rte_eth_conf port_conf = {
         .rxmode = {
             .mq_mode=RTE_ETH_MQ_RX_NONE,
@@ -219,7 +220,7 @@ int setup_port(uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte_
     if(rte_flow_flush(port_id, &flow_error))
         rte_exit(EXIT_FAILURE, "Error: could not flush flow rules: %s\n", flow_error.message);
 
-    CHECK_R((r=rte_eth_dev_configure(port_id, 1, 1, &port_conf))!=0);
+    CHECK_R((r=rte_eth_dev_configure(port_id, nb_rx_queues, nb_tx_queues, &port_conf))!=0);
 
     struct rte_eth_txconf txconf=dev_info.default_txconf;
     txconf.offloads=port_conf.txmode.offloads;
@@ -227,10 +228,15 @@ int setup_port(uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte_
     struct rte_eth_rxconf rxconf=dev_info.default_rxconf;
     rxconf.offloads=port_conf.rxmode.offloads;
 
+    printf("[%u] rx_free_thresh: %u tx_free_thresh: %u\n", port_id, rxconf.rx_free_thresh, txconf.tx_free_thresh);
+    rxconf.rx_free_thresh=256;
+    txconf.tx_free_thresh=256;
 
-    CHECK_R((r=rte_eth_tx_queue_setup(port_id, 0, DEFAULT_NB_TX_DESC, rte_eth_dev_socket_id(0), &txconf))<0);
+    for(uint i=0; i<nb_tx_queues; ++i)
+        CHECK_R((r=rte_eth_tx_queue_setup(port_id, i, DEFAULT_NB_TX_DESC, rte_eth_dev_socket_id(0), &txconf))<0);
 
-    CHECK_R((r=rte_eth_rx_queue_setup(port_id, 0, DEFAULT_NB_RX_DESC, rte_eth_dev_socket_id(0), &rxconf, mpool))<0);
+    for(uint i=0; i<nb_rx_queues; ++i)
+        CHECK_R((r=rte_eth_rx_queue_setup(port_id, i, DEFAULT_NB_RX_DESC, rte_eth_dev_socket_id(0), &rxconf, mpool))<0);
 
 #ifdef USE_EXT_MEM
     if(rte_dev_dma_map(dev_info.device, ext_mem->buf_ptr, ext_mem->buf_iova, ext_mem->buf_len))
