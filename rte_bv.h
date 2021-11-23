@@ -8,8 +8,8 @@ extern "C" {
 #include <stdint.h>
 #include <rte_hash.h>
 
-#define RTE_BV_MARKERS_MAX_ENTRIES 100000
-#define RTE_BV_MARKERS_LIST_STND_SIZE 24
+#define RTE_BV_MARKERS_MAX_ENTRIES 100000ULL
+#define RTE_BV_MARKERS_LIST_STND_SIZE 24ULL
 
 typedef struct {
     uint32_t value;

@@ -27,18 +27,17 @@ struct rte_table_bv {
     struct rte_table_stats stats;
     const struct rte_table_bv_field_def *field_defs;
 
-    uint8_t *act_buf; // size==1, pointer for gpu
-    uint8_t *act_buf_h; // host pointer
-    uint32_t **ranges_db; // size==[2*num_fields][2*RTE_TABLE_BV_MAX_RANGES]
-    uint32_t **bvs_db; // size==[2*num_fields][RTE_TABLE_BV_BS*2*RTE_TABLE_BV_MAX_RANGES]
+    uint8_t act_buf; // which double buffer is currently active
+    uint32_t **ranges; // size==[num_fields][2*RTE_TABLE_BV_MAX_RANGES]
+    uint32_t **bvs; // size==[num_fields][RTE_TABLE_BV_BS*2*RTE_TABLE_BV_MAX_RANGES]
 
     size_t *num_ranges;
     uint32_t *field_ptype_masks;
     uint32_t *field_offsets;
     uint8_t *field_sizes;
 
-    uint32_t **ranges_db_dev;
-    uint32_t **bvs_db_dev;
+    uint32_t **ranges_dev;
+    uint32_t **bvs_dev;
 
     uint8_t **pkts_data;
     uint8_t **pkts_data_h;
@@ -63,13 +62,12 @@ static int rte_table_bv_free(void *t_r) {
 
     struct rte_table_bv *t=(struct rte_table_bv *) t_r;
 
-    cudaFreeHost(t->act_buf);
-    for(size_t i=0; i<t->num_fields<<1; ++i) {
-        cudaFree(t->ranges_db[i]);
-        cudaFree(t->bvs_db[i]);
+    for(size_t i=0; i<t->num_fields; ++i) {
+        cudaFree(t->ranges[i]);
+        cudaFree(t->bvs[i]);
     }
-    cudaFree(t->ranges_db_dev);
-    cudaFree(t->bvs_db_dev);
+    cudaFree(t->ranges_dev);
+    cudaFree(t->bvs_dev);
 
     cudaFree(t->num_ranges);
     cudaFree(t->field_offsets);
@@ -79,8 +77,8 @@ static int rte_table_bv_free(void *t_r) {
         rte_bv_markers_free(t->bv_markers+i);
 
     rte_free(t->bv_markers);
-    rte_free(t->ranges_db);
-    rte_free(t->bvs_db);
+    rte_free(t->ranges);
+    rte_free(t->bvs);
 
     rte_free(t);
 
@@ -96,12 +94,12 @@ static void *rte_table_bv_create(void *params, int socket_id, uint32_t entry_siz
 
     t->num_fields=p->num_fields;
     t->field_defs=p->field_defs;
+    t->act_buf=0;
 
-    t->ranges_db=(uint32_t **) rte_malloc("ranges_db", sizeof(uint32_t *)*(t->num_fields<<1), 0);
-    t->bvs_db=(uint32_t **) rte_malloc("bvs_db", sizeof(uint32_t *)*(t->num_fields<<1), 0);
+    t->ranges=(uint32_t **) rte_malloc("ranges_db", sizeof(uint32_t *)*t->num_fields, 0);
+    t->bvs=(uint32_t **) rte_malloc("bvs_db", sizeof(uint32_t *)*t->num_fields, 0);
+
 #define CHECK(X) if(IS_ERROR(X)) return NULL
-    CHECK(cudaHostAlloc((void **) &t->act_buf_h, sizeof(uint8_t), cudaHostAllocMapped));
-    CHECK(cudaHostGetDevicePointer((void **) &t->act_buf, t->act_buf_h, 0));
 
     CHECK(cudaHostAlloc((void **) &t->pkts_data_h, sizeof(uint8_t*)*RTE_TABLE_BV_MAX_PKTS, cudaHostAllocMapped|cudaHostAllocWriteCombined));
     CHECK(cudaHostGetDevicePointer((void **) &t->pkts_data, t->pkts_data_h, 0));
@@ -109,26 +107,24 @@ static void *rte_table_bv_create(void *params, int socket_id, uint32_t entry_siz
     CHECK(cudaHostAlloc((void **) &t->packet_types_h, sizeof(uint32_t)*RTE_TABLE_BV_MAX_PKTS, cudaHostAllocMapped|cudaHostAllocWriteCombined));
     CHECK(cudaHostGetDevicePointer((void **) &t->packet_types, t->packet_types_h, 0));
 
-    CHECK(cudaMalloc((void **) &t->ranges_db_dev, sizeof(uint32_t *)*t->num_fields*2));
-    CHECK(cudaMalloc((void **) &t->bvs_db_dev, sizeof(uint32_t *)*t->num_fields*2));
+    CHECK(cudaMalloc((void **) &t->ranges_dev, sizeof(uint32_t *)*t->num_fields));
+    CHECK(cudaMalloc((void **) &t->bvs_dev, sizeof(uint32_t *)*t->num_fields));
     CHECK(cudaMalloc((void **) &t->field_offsets, sizeof(uint32_t)*t->num_fields));
     CHECK(cudaMalloc((void **) &t->field_ptype_masks, sizeof(uint32_t)*t->num_fields));
     CHECK(cudaMalloc((void **) &t->field_sizes, sizeof(uint32_t)*t->num_fields));
-    CHECK(cudaMalloc((void **) &t->num_ranges, sizeof(size_t)*t->num_fields));
+    CHECK(cudaMalloc((void **) &t->num_ranges, sizeof(uint64_t)*t->num_fields));
 
     for(size_t i=0; i<t->num_fields; ++i) {
         CHECK(cudaMemcpy(t->field_offsets+i, &t->field_defs[i].offset, sizeof(uint32_t), cudaMemcpyHostToDevice));
         CHECK(cudaMemcpy(t->field_sizes+i, &t->field_defs[i].size, sizeof(uint32_t), cudaMemcpyHostToDevice));
         CHECK(cudaMemcpy(t->field_ptype_masks+i, &t->field_defs[i].ptype_mask, sizeof(uint32_t), cudaMemcpyHostToDevice));
 
-        CHECK(cudaMalloc((void **) &t->ranges_db[i], sizeof(uint32_t)*RTE_TABLE_BV_MAX_RANGES*2));
-        CHECK(cudaMalloc((void **) &t->ranges_db[t->num_fields+i], sizeof(uint32_t)*RTE_TABLE_BV_MAX_RANGES*2));
-        CHECK(cudaMalloc((void **) &t->bvs_db[i], sizeof(uint32_t)*RTE_TABLE_BV_BS*RTE_TABLE_BV_MAX_RANGES*2));
-        CHECK(cudaMalloc((void **) &t->bvs_db[t->num_fields+i], sizeof(uint32_t)*RTE_TABLE_BV_BS*RTE_TABLE_BV_MAX_RANGES*2));
+        CHECK(cudaMalloc((void **) &t->ranges[i], sizeof(uint32_t)*((size_t) RTE_TABLE_BV_MAX_RANGES) *2));
+        CHECK(cudaMalloc((void **) &t->bvs[i], sizeof(uint32_t)*((size_t) RTE_TABLE_BV_BS) * ((size_t ) RTE_TABLE_BV_MAX_RANGES) *2));
     }
 
-    CHECK(cudaMemcpy(t->ranges_db_dev, t->ranges_db, sizeof(uint32_t *)*t->num_fields*2, cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpy(t->bvs_db_dev, t->bvs_db, sizeof(uint32_t *)*t->num_fields*2, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(t->ranges_dev, t->ranges, sizeof(uint32_t *)*t->num_fields, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(t->bvs_dev, t->bvs, sizeof(uint32_t *)*t->num_fields, cudaMemcpyHostToDevice));
 #undef CHECK
 
     t->bv_markers=(rte_bv_markers_t *) rte_malloc("bv_markers", sizeof(rte_bv_markers_t)*t->num_fields, 0);
@@ -177,7 +173,6 @@ static int rte_table_bv_entry_add(void *t_r, void *k_r, void *e_r, int *key_foun
     *key_found=0;
 
     uint32_t from_to[2];
-    uint8_t next_act_buf=*t->act_buf_h^1;
     rte_bv_ranges_t ranges;
 
     for(uint32_t f=0; f<t->num_fields; ++f) {
@@ -186,13 +181,11 @@ static int rte_table_bv_entry_add(void *t_r, void *k_r, void *e_r, int *key_foun
 
         memset(&ranges, 0, sizeof(rte_bv_ranges_t));
         ranges.bv_bs=RTE_TABLE_BV_BS;
-        ranges.ranges=t->ranges_db[(next_act_buf*t->num_fields)+f];
-        ranges.bvs=t->bvs_db[(next_act_buf*t->num_fields)+f];
+        ranges.ranges=t->ranges[t->num_fields+f];
+        ranges.bvs=t->bvs[t->num_fields+f];
         rte_bv_markers_to_ranges(t->bv_markers+f, 1, sizeof(uint32_t), &ranges);
-        cudaMemcpy(t->num_ranges+f, (void *) &ranges.num_ranges, sizeof(uint32_t), cudaMemcpyHostToDevice);
+        cudaMemcpy(t->num_ranges+f, (void *) &ranges.num_ranges, sizeof(uint64_t), cudaMemcpyHostToDevice);
     }
-
-    *t->act_buf_h=next_act_buf;
 
     return 0;
 }
@@ -203,7 +196,6 @@ static int rte_table_bv_entry_delete(void  *t_r, void *k_r, int *key_found, void
     *key_found=0;
 
     uint32_t from_to[2];
-    uint8_t next_act_buf=*t->act_buf_h^1;
     rte_bv_ranges_t ranges;
 
     for(uint32_t f=0; f<t->num_fields; ++f) {
@@ -212,10 +204,10 @@ static int rte_table_bv_entry_delete(void  *t_r, void *k_r, int *key_found, void
 
         memset(&ranges, 0, sizeof(rte_bv_ranges_t));
         ranges.bv_bs=RTE_TABLE_BV_BS;
-        ranges.ranges=t->ranges_db[(next_act_buf*t->num_fields)+f];
-        ranges.bvs=t->bvs_db[(next_act_buf*t->num_fields)+f];
+        ranges.ranges=t->ranges[f];
+        ranges.bvs=t->bvs[f];
         rte_bv_markers_to_ranges(t->bv_markers+f, 1, sizeof(uint32_t), &ranges);
-        cudaMemcpy(t->num_ranges+f, (void *) &ranges.num_ranges, sizeof(uint32_t), cudaMemcpyHostToDevice);
+        cudaMemcpy(t->num_ranges+f, (void *) &ranges.num_ranges, sizeof(uint64_t), cudaMemcpyHostToDevice);
     }
 
     return 0;
@@ -226,7 +218,6 @@ static int rte_table_bv_entry_add_bulk(void *t_r, void **ks_r, void **es_r, uint
     struct rte_table_bv_key **ks=(struct rte_table_bv_key **) ks_r;
 
     uint32_t from_to[2];
-    uint8_t next_act_buf=*t->act_buf_h^1;
     rte_bv_ranges_t ranges;
 
     for(uint32_t f=0; f<t->num_fields; ++f) {
@@ -237,13 +228,11 @@ static int rte_table_bv_entry_add_bulk(void *t_r, void **ks_r, void **es_r, uint
 
         memset(&ranges, 0, sizeof(rte_bv_ranges_t));
         ranges.bv_bs=RTE_TABLE_BV_BS;
-        ranges.ranges=t->ranges_db[(next_act_buf*t->num_fields)+f];
-        ranges.bvs=t->bvs_db[(next_act_buf*t->num_fields)+f];
+        ranges.ranges=t->ranges[f];
+        ranges.bvs=t->bvs[f];
         rte_bv_markers_to_ranges(t->bv_markers+f, 1, sizeof(uint32_t), &ranges);
-        cudaMemcpy(t->num_ranges+f, (void *) &ranges.num_ranges, sizeof(uint32_t), cudaMemcpyHostToDevice);
+        cudaMemcpy(t->num_ranges+f, (void *) &ranges.num_ranges, sizeof(uint64_t), cudaMemcpyHostToDevice);
     }
-
-    *t->act_buf_h=next_act_buf;
 
     return 0;
 }
@@ -253,7 +242,6 @@ static int rte_table_bv_entry_delete_bulk(void  *t_r, void **ks_r, uint32_t n_ke
     struct rte_table_bv_key **ks=(struct rte_table_bv_key **) ks_r;
 
     uint32_t from_to[2];
-    uint8_t next_act_buf=*t->act_buf_h^1;
     rte_bv_ranges_t ranges;
 
     for(uint32_t f=0; f<t->num_fields; ++f) {
@@ -264,13 +252,11 @@ static int rte_table_bv_entry_delete_bulk(void  *t_r, void **ks_r, uint32_t n_ke
 
         memset(&ranges, 0, sizeof(rte_bv_ranges_t));
         ranges.bv_bs=RTE_TABLE_BV_BS;
-        ranges.ranges=t->ranges_db[(next_act_buf*t->num_fields)+f];
-        ranges.bvs=t->bvs_db[(next_act_buf*t->num_fields)+f];
+        ranges.ranges=t->ranges[f];
+        ranges.bvs=t->bvs[f];
         rte_bv_markers_to_ranges(t->bv_markers+f, 1, sizeof(uint32_t), &ranges);
-        cudaMemcpy(t->num_ranges+f, (void *) &ranges.num_ranges, sizeof(uint32_t), cudaMemcpyHostToDevice);
+        cudaMemcpy(t->num_ranges+f, (void *) &ranges.num_ranges, sizeof(uint64_t), cudaMemcpyHostToDevice);
     }
-
-    *t->act_buf_h=next_act_buf;
 
     return 0;
 }
@@ -314,12 +300,14 @@ __global__ void bv_search(	 uint32_t **ranges,  uint64_t *num_ranges,  uint32_t 
         }
 
         uint *range_dim=ranges[threadIdx.x];
-        long se[]= {0, (long) num_ranges[threadIdx.x]};
+        long long int se[]= {0, (long long int) num_ranges[threadIdx.x]};
         uint8_t l,r;
         bv[threadIdx.x]=NULL;
-        for(long i=se[1]>>1; se[0]<=se[1]; i=(se[0]+se[1])>>1) {
+
+        for(long long int i=se[1]>>1; se[0]<=se[1]; i=(se[0]+se[1])>>1) {
             l=v>=range_dim[i<<1];
             r=v<=range_dim[(i<<1)+1];
+
             if(l&r) {
                 bv[threadIdx.x]=bvs[threadIdx.x]+i*RTE_TABLE_BV_BS;
                 field_found[threadIdx.x]=true;
@@ -364,9 +352,9 @@ static int rte_table_bv_lookup(void *t_r, struct rte_mbuf **pkts, uint64_t pkts_
             t->packet_types_h[i]=pkts[i]->packet_type;
         }
 
-    bv_search<<<64, t->num_fields>>>(	t->ranges_db_dev+(t->num_fields*(*t->act_buf_h)), t->num_ranges,
+    bv_search<<<64, t->num_fields>>>(	t->ranges_dev, t->num_ranges,
                                         t->field_offsets, t->field_sizes, t->field_ptype_masks,
-                                        t->bvs_db_dev+(t->num_fields*(*t->act_buf_h)), RTE_TABLE_BV_BS,
+                                        t->bvs_dev, RTE_TABLE_BV_BS,
                                         pkts_mask, t->pkts_data, t->packet_types,
                                         (uint32_t *) e, lookup_hit_mask);
     cudaStreamSynchronize(0);
