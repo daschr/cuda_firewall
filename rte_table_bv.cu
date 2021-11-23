@@ -340,6 +340,36 @@ end:
     __syncthreads();
 }
 
+int rte_table_bv_lookup_stream(void *t_r, cudaStream_t stream, struct rte_mbuf **pkts, uint64_t pkts_mask,
+                               uint64_t *lookup_hit_mask, void **e) {
+
+    struct rte_table_bv *t=(struct rte_table_bv *) t_r;
+
+    const uint32_t n_pkts_in=__builtin_popcountll(pkts_mask);
+    RTE_TABLE_BV_STATS_PKTS_IN_ADD(t, n_pkts_in);
+
+    for(uint32_t i=0; i<n_pkts_in; ++i)
+        if((pkts_mask>>i)&1) {
+            t->pkts_data_h[i]=rte_pktmbuf_mtod(pkts[i], uint8_t *);
+            t->packet_types_h[i]=pkts[i]->packet_type;
+        }
+
+    bv_search<<<64, t->num_fields, 0, stream>>>(	t->ranges_dev, t->num_ranges,
+            t->field_offsets, t->field_sizes, t->field_ptype_masks,
+            t->bvs_dev, RTE_TABLE_BV_BS,
+            pkts_mask, t->pkts_data, t->packet_types,
+            (uint32_t *) e, lookup_hit_mask);
+    cudaStreamSynchronize(stream);
+
+    RTE_TABLE_BV_STATS_PKTS_LOOKUP_MISS(t, n_pkts_in-__builtin_popcountll(*lookup_hit_mask));
+    /*
+        cudaError_t err = cudaGetLastError();
+        if(err!=cudaSuccess)
+            printf("[bv_search] error: %s\n", cudaGetErrorString(err));
+    */
+    return 0;
+}
+
 static int rte_table_bv_lookup(void *t_r, struct rte_mbuf **pkts, uint64_t pkts_mask, uint64_t *lookup_hit_mask, void **e) {
     struct rte_table_bv *t=(struct rte_table_bv *) t_r;
 

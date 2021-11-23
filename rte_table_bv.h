@@ -10,6 +10,8 @@ extern "C" {
 #include "rte_bv.h"
 #include <rte_table.h>
 
+#include <cuda_runtime.h>
+
 #define RTE_TABLE_BV_MAX_RANGES ((size_t) (RTE_BV_MARKERS_MAX_ENTRIES>>1))
 #define RTE_TABLE_BV_BS	((size_t) (RTE_TABLE_BV_MAX_RANGES>>5))
 #define RTE_TABLE_BV_MAX_PKTS 64
@@ -44,6 +46,10 @@ struct rte_table_bv_key {
 };
 
 extern struct rte_table_ops rte_table_bv_ops;
+
+int rte_table_bv_lookup_stream(void *t_r, cudaStream_t stream, struct rte_mbuf **pkts, uint64_t pkts_mask,
+                               uint64_t *lookup_hit_mask, void **e);
+
 
 #ifdef __cplusplus
 }

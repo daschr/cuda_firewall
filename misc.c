@@ -64,7 +64,9 @@ int setup_memory(struct rte_pktmbuf_extmem *ext_mem, struct rte_mempool **mpool_
 }
 
 #define CHECK_R(X) if(X){fprintf(stderr, "Error: " #X  " (r=%d)\n", r); return 1;}
-int setup_port(uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte_mempool *mpool_payload) {
+int setup_port( uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte_mempool *mpool_payload,
+                uint16_t nb_rx_queues, uint16_t nb_tx_queues, uint64_t rx_offload_capas, uint64_t tx_offload_capas) {
+
     struct rte_eth_conf port_conf = {
         .rxmode = {
             .mq_mode=RTE_ETH_MQ_RX_NONE,
@@ -86,14 +88,14 @@ int setup_port(uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte_
     print_tx_offload_capas(dev_info.tx_offload_capa);
     printf("\n");
 
-#define RX_OC(X) RTE_ETH_RX_OFFLOAD_##X
-#define TX_OC(X) RTE_ETH_TX_OFFLOAD_##X
+    port_conf.rxmode.offloads=rx_offload_capas&dev_info.rx_offload_capa;
+    port_conf.txmode.offloads=tx_offload_capas&dev_info.tx_offload_capa;
 
-    port_conf.rxmode.offloads=RX_OC(IPV4_CKSUM)|RX_OC(TCP_CKSUM)|RX_OC(UDP_CKSUM); //dev_info.rx_offload_capa;
-    port_conf.txmode.offloads=TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM)|TX_OC(TCP_TSO); //dev_info.tx_offload_capa;
+    printf("ENABLED RX OFFLOAD CAPABILITIES:\n");
+    print_rx_offload_capas(port_conf.rxmode.offloads);
 
-#undef RX_OC
-#undef TX_OC
+    printf("ENABLED TX OFFLOAD CAPABILITIES:\n");
+    print_tx_offload_capas(port_conf.txmode.offloads);
 
     if(dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE) {
         printf("enabling fast free\n");
@@ -106,18 +108,28 @@ int setup_port(uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte_
     if(rte_flow_flush(port_id, &flow_error))
         rte_exit(EXIT_FAILURE, "Error: could not flush flow rules: %s\n", flow_error.message);
 
-    CHECK_R((r=rte_eth_dev_configure(port_id, 1, 1, &port_conf))!=0);
+    printf("[%u] min_rx_bufsize: %u max_rx_pktlen: %u\n", port_id,  dev_info.min_rx_bufsize, dev_info.max_rx_pktlen);
+    printf("[%u] max_rx_queues: %u max_tx_queues: %u\n", port_id,  dev_info.max_rx_queues, dev_info.max_tx_queues);
+
+    CHECK_R((r=rte_eth_dev_configure(port_id, nb_rx_queues, nb_tx_queues, &port_conf))!=0);
 
     struct rte_eth_txconf txconf=dev_info.default_txconf;
     txconf.offloads=port_conf.txmode.offloads;
 
-    CHECK_R((r=rte_eth_tx_queue_setup(port_id, 0, DEFAULT_NB_TX_DESC, rte_eth_dev_socket_id(0), &txconf))<0);
+    struct rte_eth_rxconf rxconf=dev_info.default_rxconf;
+    rxconf.offloads=port_conf.rxmode.offloads;
 
-    CHECK_R((r=rte_eth_rx_queue_setup(port_id, 0, DEFAULT_NB_RX_DESC, rte_eth_dev_socket_id(0), NULL, mpool_payload))<0);
+    printf("[%u] rx_free_thresh: %u tx_free_thresh: %u\n", port_id, rxconf.rx_free_thresh, txconf.tx_free_thresh);
+    rxconf.rx_free_thresh=256;
+    txconf.tx_free_thresh=256;
+    for(uint i=0; i<nb_tx_queues; ++i)
+        CHECK_R((r=rte_eth_tx_queue_setup(port_id, i, DEFAULT_NB_TX_DESC, rte_eth_dev_socket_id(0), &txconf))<0);
+
+    for(uint i=0; i<nb_rx_queues; ++i)
+        CHECK_R((r=rte_eth_rx_queue_setup(port_id, i, DEFAULT_NB_RX_DESC, rte_eth_dev_socket_id(0), &rxconf, mpool_payload))<0);
 
     if(rte_dev_dma_map(dev_info.device, ext_mem->buf_ptr, ext_mem->buf_iova, ext_mem->buf_len))
-        fprintf(stderr, "Failed DMA mapping for port %u: %s\n", port_id, rte_strerror(rte_errno));
-
+        fprintf(stderr, "Error while dma mapping: %s\n", rte_strerror(rte_errno));
 
     CHECK_R((r=rte_eth_dev_start(port_id))<0);
 

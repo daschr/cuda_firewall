@@ -259,10 +259,21 @@ int main(int ac, char *as[]) {
         return EXIT_FAILURE;
     }
 
-    if(setup_port(trunk_port_id, &ext_mem, mpool_payload)|setup_port(tap_port_id, &ext_mem, mpool_payload)) {
+#define RX_OC(X) RTE_ETH_RX_OFFLOAD_##X
+#define TX_OC(X) RTE_ETH_TX_OFFLOAD_##X
+
+    if(setup_port(trunk_port_id, &ext_mem, mpool_payload, DEFAULT_NB_QUEUES, DEFAULT_NB_QUEUES,
+                  RX_OC(IPV4_CKSUM)|RX_OC(TCP_CKSUM)|RX_OC(UDP_CKSUM),
+                  TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM))
+            |setup_port(tap_port_id, &ext_mem, mpool_payload, DEFAULT_NB_QUEUES, DEFAULT_NB_QUEUES,
+                        RX_OC(IPV4_CKSUM)|RX_OC(TCP_CKSUM)|RX_OC(UDP_CKSUM),
+                        TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM))) {
         rte_eal_cleanup();
         return EXIT_FAILURE;
     }
+
+#undef RX_OC
+#undef TX_OC
 
     port_stats=rte_malloc("port_stats", sizeof(stats_t)*2, 0);
     memset(port_stats, 0, sizeof(stats_t)*2);
