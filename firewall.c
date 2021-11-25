@@ -332,8 +332,7 @@ int main(int ac, char *as[]) {
     coreid=rte_get_next_lcore(coreid, 1, 1);
     rte_eal_remote_launch(firewall, &fw_conf, coreid);
 
-    coreid=rte_get_next_lcore(coreid, 1, 1);
-    rte_eal_remote_launch(print_stats, port_stats, coreid);
+    print_stats((void *) port_stats);
 
     RTE_LCORE_FOREACH_WORKER(coreid)
     rte_eal_wait_lcore(coreid);
