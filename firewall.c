@@ -48,14 +48,16 @@ typedef struct {
     uint8_t *actions;
     struct rte_ether_addr *tap_macaddr;
     stats_t *stats;
-} firewall_conf_t;
+} __rte_cache_aligned firewall_conf_t;
 
 struct rte_pktmbuf_extmem ext_mem;
 struct rte_mempool *mpool_payload;
 void *table;
 ruleset_t ruleset;
 uint16_t tap_port_id, trunk_port_id;
-stats_t *port_stats=NULL;
+unsigned long timestamp;
+
+stats_t *old_port_stats=NULL, *port_stats=NULL;
 
 firewall_conf_t fw_conf;
 
@@ -74,47 +76,29 @@ void exit_handler(int e) {
     rte_table_bv_ops.f_free(table);
 
     rte_free(port_stats);
+    rte_free(old_port_stats);
 
     rte_eal_cleanup();
 
     exit(EXIT_SUCCESS);
 }
 
-static int print_stats(void *arg) {
-    stats_t *stats=(stats_t *) arg;
-    struct timeval t[2];
-    unsigned long ts[2];
-    double ts_d;
-    int p=1;
-    stats_t stats_buf[4];
-    memset(stats_buf, 0, sizeof(stats_t)*4);
+void print_stats(__rte_unused int e) {
+    struct timeval t;
+    gettimeofday(&t, NULL);
 
-    gettimeofday(t, NULL);
-    ts[0]=1000000*t[0].tv_sec+t[0].tv_usec;
+    unsigned long new_ts=1000000*t.tv_sec+t.tv_usec;
+    double ts_d=(double) (new_ts-timestamp)/1000000.0;
 
-    stats_buf[0]=stats[0];
-    stats_buf[2]=stats[1];
+#define PPS(X, P) (((double) (port_stats[P].X-old_port_stats[P].X))/ts_d)
+    printf("[trunk] pkts_in: %.2lfpps pkts_out: %.2lfpps pkts_dropped: %.2lfpps pkts_accepted: %.2lfpps\n",
+           PPS(pkts_in, 0), PPS(pkts_out, 0), PPS(pkts_dropped, 0), PPS(pkts_accepted, 0));
 
-    while(running) {
-        rte_delay_ms(1000);
-        gettimeofday(t+p, NULL);
-        stats_buf[p]=stats[0];
-        stats_buf[2+p]=stats[1];
-        ts[p]=1000000*t[p].tv_sec+t[p].tv_usec;
-        ts_d=(double) (ts[p]-ts[p^1])/1000000.0;
-
-#define PPS(X, I) (((double) (stats_buf[I+p].X-stats_buf[I+(p^1)].X))/ts_d)
-        printf("[trunk] pkts_in: %.2lfpps pkts_out: %.2lfpps pkts_dropped: %.2lfpps pkts_accepted: %.2lfpps\n",
-               PPS(pkts_in, 0), PPS(pkts_out, 0), PPS(pkts_dropped, 0), PPS(pkts_accepted, 0));
-
-        printf("[fw-tap] pkts_in: %.2lfpps pkts_out: %.2lfpps pkts_dropped: %.2lfpps pkts_accepted: %.2lfpps\n",
-               PPS(pkts_in, 2), PPS(pkts_out, 2), PPS(pkts_dropped, 2), PPS(pkts_accepted, 2));
+    old_port_stats[0]=port_stats[0];
+    printf("[fw-tap] pkts_in: %.2lfpps pkts_out: %.2lfpps pkts_dropped: %.2lfpps pkts_accepted: %.2lfpps\n",
+           PPS(pkts_in, 1), PPS(pkts_out, 1), PPS(pkts_dropped, 1), PPS(pkts_accepted, 1));
+    old_port_stats[1]=port_stats[1];
 #undef PPS
-
-        p^=1;
-    };
-
-    return 0;
 }
 
 static int firewall(void *arg) {
@@ -141,7 +125,7 @@ static int firewall(void *arg) {
     int16_t i,j;
 
     *lookup_hit_mask=0;
-    for(; running; *lookup_hit_mask=0) {
+    for(; likely(running); *lookup_hit_mask=0) {
         const uint16_t nb_rx = rte_eth_rx_burst(trunk_port_id, 0, bufs_rx, BURST_SIZE);
 
         if(unlikely(nb_rx==0))
@@ -155,11 +139,12 @@ static int firewall(void *arg) {
         j=0;
 
         for(; i<nb_rx; ++i) {
-            if(!(  (*lookup_hit_mask>>i)&1  &  (conf->actions[positions[i]]==RULE_DROP) )) {
-                bufs_tx[j++]=bufs_rx[i];
-                if(conf->tap_macaddr!=NULL)
-                    rte_memcpy(&(rte_pktmbuf_mtod(bufs_rx[i], struct rte_ether_hdr *)->dst_addr), conf->tap_macaddr, 6);
-            }
+            if(unlikely((*lookup_hit_mask>>i)&1&(conf->actions[positions[i]]==RULE_DROP)))
+                continue;
+
+            bufs_tx[j++]=bufs_rx[i];
+            if(conf->tap_macaddr!=NULL)
+                rte_memcpy(&(rte_pktmbuf_mtod(bufs_rx[i], struct rte_ether_hdr *)->dst_addr), conf->tap_macaddr, 6);
         }
 
         const uint16_t nb_tx = rte_eth_tx_burst(tap_port_id, 0, bufs_tx, j);
@@ -182,7 +167,7 @@ static int tap_tx(void *arg) {
     struct rte_mbuf *bufs_rx[BURST_SIZE];
     stats_t *stats=(stats_t *) arg;
 
-    while(running) {
+    while(likely(running)) {
         const uint16_t nb_rx = rte_eth_rx_burst(tap_port_id, 0, bufs_rx, BURST_SIZE);
 
         if(unlikely(nb_rx==0))
@@ -222,13 +207,19 @@ static uint8_t find_tap_trunk_devs(uint16_t *tap_id, uint16_t *trunk_id) {
 
 int main(int ac, char *as[]) {
     running=1;
+
     if(ac==1) {
         fprintf(stderr, "Usage: %s [rules]\n", as[0]);
         return EXIT_FAILURE;
     }
 
+    struct timeval t;
+    gettimeofday(&t, NULL);
+    timestamp=1000000*t.tv_sec+t.tv_usec;
+
     signal(SIGINT, exit_handler);
     signal(SIGKILL, exit_handler);
+    signal(SIGUSR1, print_stats);
 
     int offset;
 
@@ -263,7 +254,7 @@ int main(int ac, char *as[]) {
 #define TX_OC(X) RTE_ETH_TX_OFFLOAD_##X
 
     if(setup_port(trunk_port_id, &ext_mem, mpool_payload, DEFAULT_NB_QUEUES, DEFAULT_NB_QUEUES,
-                  RX_OC(IPV4_CKSUM)|RX_OC(TCP_CKSUM)|RX_OC(UDP_CKSUM),
+                  RX_OC(IPV4_CKSUM)|RX_OC(TCP_CKSUM)|RX_OC(UDP_CKSUM)|RX_OC(RSS_HASH),
                   TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM))
             |setup_port(tap_port_id, &ext_mem, mpool_payload, DEFAULT_NB_QUEUES, DEFAULT_NB_QUEUES,
                         RX_OC(IPV4_CKSUM)|RX_OC(TCP_CKSUM)|RX_OC(UDP_CKSUM),
@@ -276,7 +267,9 @@ int main(int ac, char *as[]) {
 #undef TX_OC
 
     port_stats=rte_malloc("port_stats", sizeof(stats_t)*2, 0);
+    old_port_stats=rte_malloc("old_port_stats", sizeof(stats_t)*2, 0);
     memset(port_stats, 0, sizeof(stats_t)*2);
+    memset(old_port_stats, 0, sizeof(stats_t)*2);
 
     memset(&ruleset, 0, sizeof(ruleset_t));
 
@@ -332,7 +325,7 @@ int main(int ac, char *as[]) {
     coreid=rte_get_next_lcore(coreid, 1, 1);
     rte_eal_remote_launch(firewall, &fw_conf, coreid);
 
-    print_stats((void *) port_stats);
+//	firewall(&fw_conf);
 
     RTE_LCORE_FOREACH_WORKER(coreid)
     rte_eal_wait_lcore(coreid);
