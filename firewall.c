@@ -66,10 +66,7 @@ volatile uint8_t running;
 void exit_handler(int e) {
     running=0;
 
-    unsigned int i;
-    RTE_LCORE_FOREACH_WORKER(i) {
-        rte_eal_wait_lcore(i);
-    }
+    rte_eal_mp_wait_lcore();
 
     free_ruleset(&ruleset);
 
@@ -93,8 +90,8 @@ void print_stats(__rte_unused int e) {
 #define PPS(X, P) (((double) (port_stats[P].X-old_port_stats[P].X))/ts_d)
     printf("[trunk] pkts_in: %.2lfpps pkts_out: %.2lfpps pkts_dropped: %.2lfpps pkts_accepted: %.2lfpps\n",
            PPS(pkts_in, 0), PPS(pkts_out, 0), PPS(pkts_dropped, 0), PPS(pkts_accepted, 0));
-
     old_port_stats[0]=port_stats[0];
+
     printf("[fw-tap] pkts_in: %.2lfpps pkts_out: %.2lfpps pkts_dropped: %.2lfpps pkts_accepted: %.2lfpps\n",
            PPS(pkts_in, 1), PPS(pkts_out, 1), PPS(pkts_dropped, 1), PPS(pkts_accepted, 1));
     old_port_stats[1]=port_stats[1];
@@ -254,7 +251,7 @@ int main(int ac, char *as[]) {
 #define TX_OC(X) RTE_ETH_TX_OFFLOAD_##X
 
     if(setup_port(trunk_port_id, &ext_mem, mpool_payload, DEFAULT_NB_QUEUES, DEFAULT_NB_QUEUES,
-                  RX_OC(IPV4_CKSUM)|RX_OC(TCP_CKSUM)|RX_OC(UDP_CKSUM)|RX_OC(RSS_HASH),
+                  RX_OC(IPV4_CKSUM)|RX_OC(TCP_CKSUM)|RX_OC(UDP_CKSUM),
                   TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM))
             |setup_port(tap_port_id, &ext_mem, mpool_payload, DEFAULT_NB_QUEUES, DEFAULT_NB_QUEUES,
                         RX_OC(IPV4_CKSUM)|RX_OC(TCP_CKSUM)|RX_OC(UDP_CKSUM),
@@ -327,8 +324,7 @@ int main(int ac, char *as[]) {
 
 //	firewall(&fw_conf);
 
-    RTE_LCORE_FOREACH_WORKER(coreid)
-    rte_eal_wait_lcore(coreid);
+    rte_eal_mp_wait_lcore();
 
     rte_table_bv_ops.f_free(table);
 

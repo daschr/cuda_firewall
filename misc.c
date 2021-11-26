@@ -69,9 +69,9 @@ int setup_port( uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte
 
     struct rte_eth_conf port_conf = {
         .rxmode = {
-            .mq_mode=RTE_ETH_MQ_RX_DCB_RSS,
+            .mq_mode=RTE_ETH_MQ_RX_NONE,
             .mtu = DEFAULT_MTU,
-			.split_hdr_size=0,
+            .split_hdr_size=0,
         },
         .txmode = {
             .mq_mode=ETH_MQ_TX_NONE,
