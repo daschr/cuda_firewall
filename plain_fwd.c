@@ -49,9 +49,7 @@ uint8_t running;
 void exit_handler(int e) {
     __atomic_store_n(&running, 0, __ATOMIC_RELAXED);
 
-    unsigned int i;
-    RTE_LCORE_FOREACH_WORKER(i)
-    rte_eal_wait_lcore(i);
+    rte_eal_mp_wait_lcore();
 
     rte_free(port_stats);
     rte_eal_cleanup();
@@ -100,57 +98,55 @@ static int print_stats(void *arg) {
     return 0;
 }
 
-static int plain_fwd(void *arg) {
-    const uint16_t queue_id=*((uint16_t *) arg);
+static int forward(__rte_unused void *arg) {
+    printf("%u launched...\n", rte_lcore_id());
+    const uint16_t queue_id=rte_lcore_id()>>1;
     struct rte_mbuf *bufs_rx[BURST_SIZE];
-    stats_t *stats=port_stats;
 
-    printf("[plain_fwd] lcore_id: %u queue_id: %u\n", rte_lcore_id(), queue_id);
+    if(rte_lcore_id()&1) {
+        stats_t *stats=port_stats;
 
-    while(__atomic_load_n(&running, __ATOMIC_RELAXED)) {
-        const uint16_t nb_rx = rte_eth_rx_burst(trunk_port_id, queue_id, bufs_rx, BURST_SIZE);
+        printf("[plain_fwd] lcore_id: %u queue_id: %u\n", rte_lcore_id(), queue_id);
 
-        if(unlikely(nb_rx==0))
-            continue;
+        while(likely(__atomic_load_n(&running, __ATOMIC_RELAXED))) {
+            const uint16_t nb_rx = rte_eth_rx_burst(trunk_port_id, queue_id, bufs_rx, BURST_SIZE);
 
-        for(uint16_t i=0; i<nb_rx; ++i)
-            rte_ether_addr_copy(&tap_macaddr, &(rte_pktmbuf_mtod(bufs_rx[i], struct rte_ether_hdr *)->dst_addr));
+            if(unlikely(nb_rx==0))
+                continue;
 
-        const uint16_t nb_tx = rte_eth_tx_burst(tap_port_id, queue_id, bufs_rx, nb_rx);
+            for(uint16_t i=0; i<nb_rx; ++i)
+                rte_ether_addr_copy(&tap_macaddr, &(rte_pktmbuf_mtod(bufs_rx[i], struct rte_ether_hdr *)->dst_addr));
 
-        __atomic_add_fetch(&stats->pkts_in, nb_rx, __ATOMIC_RELEASE);
-        __atomic_add_fetch(&stats->pkts_out, nb_tx, __ATOMIC_RELEASE);
+            const uint16_t nb_tx = rte_eth_tx_burst(tap_port_id, queue_id, bufs_rx, nb_rx);
 
-        if(unlikely(nb_tx<nb_rx)) {
-            for(uint16_t b=nb_tx; b<nb_rx; ++b)
-                rte_pktmbuf_free(bufs_rx[b]);
+            __atomic_add_fetch(&stats->pkts_in, nb_rx, __ATOMIC_RELEASE);
+            __atomic_add_fetch(&stats->pkts_out, nb_tx, __ATOMIC_RELEASE);
+
+            if(unlikely(nb_tx<nb_rx)) {
+                for(uint16_t b=nb_tx; b<nb_rx; ++b)
+                    rte_pktmbuf_free(bufs_rx[b]);
+            }
         }
-    }
+    } else {
+        stats_t *stats=port_stats+1;
 
-    return 0;
-}
+        printf("[tap_tx] lcore_id: %u queue_id: %u\n", rte_lcore_id(), queue_id);
 
-static int tap_tx(void *arg) {
-    const uint16_t queue_id=*((uint16_t *) arg);
-    struct rte_mbuf *bufs_rx[BURST_SIZE];
-    stats_t *stats=port_stats+1;
+        while(likely(__atomic_load_n(&running, __ATOMIC_RELAXED))) {
+            const uint16_t nb_rx = rte_eth_rx_burst(tap_port_id, queue_id, bufs_rx, BURST_SIZE);
 
-    printf("[tap_tx] lcore_id: %u queue_id: %u\n", rte_lcore_id(), queue_id);
+            if(unlikely(nb_rx==0))
+                continue;
 
-    while(__atomic_load_n(&running, __ATOMIC_RELAXED)) {
-        const uint16_t nb_rx = rte_eth_rx_burst(tap_port_id, queue_id, bufs_rx, BURST_SIZE);
+            const uint16_t nb_tx = rte_eth_tx_burst(trunk_port_id, queue_id, bufs_rx, nb_rx);
 
-        if(unlikely(nb_rx==0))
-            continue;
+            __atomic_add_fetch(&stats->pkts_in, nb_rx, __ATOMIC_RELEASE);
+            __atomic_add_fetch(&stats->pkts_out, nb_tx, __ATOMIC_RELEASE);
 
-        const uint16_t nb_tx = rte_eth_tx_burst(trunk_port_id, queue_id, bufs_rx, nb_rx);
-
-        __atomic_add_fetch(&stats->pkts_in, nb_rx, __ATOMIC_RELEASE);
-        __atomic_add_fetch(&stats->pkts_out, nb_tx, __ATOMIC_RELEASE);
-
-        if(unlikely(nb_tx<nb_rx)) {
-            for(uint16_t b=nb_tx; b<nb_rx; ++b)
-                rte_pktmbuf_free(bufs_rx[b]);
+            if(unlikely(nb_tx<nb_rx)) {
+                for(uint16_t b=nb_tx; b<nb_rx; ++b)
+                    rte_pktmbuf_free(bufs_rx[b]);
+            }
         }
     }
 
@@ -221,19 +217,19 @@ int main(int ac, char *as[]) {
     port_stats=rte_malloc("port_stats", sizeof(stats_t)*2, 0);
     memset(port_stats, 0, sizeof(stats_t)*2);
 
-    unsigned int coreid=rte_get_next_lcore(rte_get_main_lcore(), 1, 1);
-    rte_eal_remote_launch(print_stats, port_stats, coreid);
-
-    for(uint16_t i=0; i<DEFAULT_NB_QUEUES; ++i) {
+    uint16_t coreid=rte_get_next_lcore(rte_get_main_lcore(), 1, 1);
+    for(int16_t i=0; i<DEFAULT_NB_QUEUES-1; ++i) {
         coreid=rte_get_next_lcore(coreid, 1, 1);
-        rte_eal_remote_launch(tap_tx, &i, coreid);
-
+        rte_eal_remote_launch(forward, NULL, coreid);
         coreid=rte_get_next_lcore(coreid, 1, 1);
-        rte_eal_remote_launch(plain_fwd, &i, coreid);
+        rte_eal_remote_launch(forward, NULL, coreid);
     }
 
-    RTE_LCORE_FOREACH_WORKER(coreid)
-    rte_eal_wait_lcore(coreid);
+    coreid=rte_get_next_lcore(rte_get_main_lcore(), 1, 1);
+    rte_eal_remote_launch(forward, NULL, coreid);
+    forward(NULL);
+
+    rte_eal_mp_wait_lcore();
 
     rte_eal_cleanup();
     return EXIT_SUCCESS;
