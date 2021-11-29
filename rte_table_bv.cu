@@ -71,7 +71,11 @@ static int rte_table_bv_free(void *t_r) {
 
     cudaFree(t->num_ranges);
     cudaFree(t->field_offsets);
+    cudaFree(t->field_ptype_masks);
     cudaFree(t->field_sizes);
+	
+	cudaFreeHost(t->pkts_data_h);
+	cudaFreeHost(t->packet_types_h);
 
     for(uint32_t i=0; i<t->num_fields; ++i)
         rte_bv_markers_free(t->bv_markers+i);
