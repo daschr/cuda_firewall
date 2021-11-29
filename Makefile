@@ -1,6 +1,8 @@
 CFLAGS=$(shell pkg-config --cflags libdpdk)
 CLIBS=$(shell pkg-config --libs libdpdk)
 
+all: firewall
+
 rte_bv:
 	nvcc -forward-unknown-to-host-compiler -O3 -Werror all-warnings $(CFLAGS) -O3 -c rte_bv.c
 
@@ -16,4 +18,4 @@ firewall: rte_bv rte_table_bv
 clean:
 	rm *.o firewall
 
-all: firewall
+

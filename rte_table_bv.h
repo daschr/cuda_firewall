@@ -47,6 +47,7 @@ struct rte_table_bv_key {
 extern struct rte_table_ops rte_table_bv_ops;
 
 int rte_table_bv_start_kernel(void *t_r);
+int rte_table_bv_stop_kernel(void *t_r);
 
 #ifdef __cplusplus
 }
