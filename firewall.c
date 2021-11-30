@@ -133,7 +133,7 @@ static int firewall(void *arg) {
             if(unlikely(nb_rx==0))
                 continue;
 
-            pkts_mask=nb_rx==64?UINT64_MAX:((1<<nb_rx)-1);
+            pkts_mask=nb_rx==64?UINT64_MAX:((1LU<<nb_rx)-1);
 
             lookup(conf->table, bufs_rx_d, pkts_mask, (uint64_t *) lookup_hit_mask_d, (void **) positions_d);
 
