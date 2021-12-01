@@ -65,10 +65,10 @@ volatile uint8_t running;
 
 void exit_handler(int e) {
     running=0;
-	
+
     rte_eal_mp_wait_lcore();
 
-	rte_table_bv_stop_kernel(table);
+    rte_table_bv_stop_kernel(table);
 
     free_ruleset(&ruleset);
 
@@ -108,7 +108,8 @@ static int firewall(void *arg) {
     stats_t *stats=((stats_t *) conf->stats)+((rte_lcore_id()&1)^1);
 
     if(rte_lcore_id()&1) {
-        volatile uint64_t *lookup_hit_mask, *lookup_hit_mask_d, pkts_mask;
+        volatile uint64_t *lookup_hit_mask, *lookup_hit_mask_d;
+        uint64_t pkts_mask;
         volatile uint32_t *positions, *positions_d;
 
         cudaHostAlloc((void **) &positions, sizeof(uint32_t)*BURST_SIZE, cudaHostAllocMapped);
@@ -135,7 +136,8 @@ static int firewall(void *arg) {
             if(unlikely(nb_rx==0))
                 continue;
 
-            pkts_mask=(1<<nb_rx)-1;
+
+            pkts_mask=nb_rx==64?(UINT64_MAX):((1LU<<nb_rx)-1);
 
             lookup(conf->table, bufs_rx_d, pkts_mask, (uint64_t *) lookup_hit_mask_d, (void **) positions_d);
 
@@ -315,9 +317,9 @@ int main(int ac, char *as[]) {
 
     free_ruleset_except_actions(&ruleset);
 
-	printf("starting kernel\n");
-	rte_table_bv_start_kernel(table);
-	printf("done starting kernel\n");
+    printf("starting kernel\n");
+    rte_table_bv_start_kernel(table);
+    printf("done starting kernel\n");
 
     fw_conf=(firewall_conf_t) {
         .table=table, .actions=ruleset.actions, .tap_macaddr=&tap_macaddr, .stats=port_stats
