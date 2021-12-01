@@ -168,6 +168,11 @@ static void *rte_table_bv_create(void *params, int socket_id, uint32_t entry_siz
 
     CHECK(cudaMemcpy(t->ranges_dev, t->ranges, sizeof(uint32_t *)*t->num_fields, cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(t->bvs_dev, t->bvs, sizeof(uint32_t *)*t->num_fields, cudaMemcpyHostToDevice));
+
+    int mp_count;
+    CHECK(cudaDeviceGetAttribute(&mp_count, cudaDevAttrMultiProcessorCount, 0));
+    printf("mp_count: %d\n", mp_count);
+
 #undef CHECK
 
     t->bv_markers=(rte_bv_markers_t *) rte_malloc("bv_markers", sizeof(rte_bv_markers_t)*t->num_fields, 0);
@@ -304,31 +309,39 @@ static int rte_table_bv_entry_delete_bulk(void  *t_r, void **ks_r, uint32_t n_ke
     return 0;
 }
 
-__global__ void bv_search(   uint32_t **__restrict__ ranges,  uint64_t *num_ranges,  uint32_t *offsets,  uint8_t *sizes,
-                             volatile uint32_t *ptype_mask,  uint32_t **bvs, const uint32_t bv_bs,
-                             volatile uint64_t * pkts_mask, volatile uint8_t **pkts, volatile uint32_t *__restrict__ pkts_type,
-                             volatile uint *__restrict__ positions, volatile uint64_t *__restrict__ lookup_hit_mask,
-                             volatile uint64_t *__restrict__ done_pkts, volatile uint64_t *done_pkts_dev, volatile uint8_t *__restrict__ running) {
+__global__ void bv_search(	uint32_t **__restrict__ ranges, const uint64_t *__restrict__ num_ranges,
+                            const uint32_t *__restrict__ offsets, const uint8_t *__restrict__ sizes,
+                            const uint32_t *__restrict__ ptype_mask,  uint32_t **__restrict__ bvs,
+                            const uint32_t bv_bs, volatile uint64_t *__restrict__ pkts_mask,
+                            volatile uint8_t **__restrict__ pkts, volatile uint32_t *__restrict__ pkts_type,
+                            volatile uint *__restrict__ positions, volatile uint64_t *__restrict__ lookup_hit_mask,
+                            volatile uint64_t *__restrict__ done_pkts, volatile uint64_t *__restrict__ done_pkts_dev,
+                            volatile uint8_t *__restrict__ running) {
 
-    uint8_t *pkt;
     __shared__ uint *bv[16][RTE_TABLE_BV_MAX_FIELDS];
     __shared__ bool field_found[16][RTE_TABLE_BV_MAX_FIELDS];
+
     __shared__ uint64_t c_pkts_mask;
     __shared__ uint64_t c_done_pkts;
+    __shared__ uint8_t stop;
 
+    if(!(threadIdx.x|threadIdx.y))
+        stop=0;
 
-    uint v;
     const uint pkt_id=blockIdx.x*blockDim.y+threadIdx.y;
     const uint64_t reset_block_mask=~(0xffffLU<<pkt_id);
 
 //	printf("blockDim.x: %d blockDim.y: %d blockIdx.x: %d threadIdx.y: %d, pkt_id: %u\n", blockDim.x, blockDim.y, blockIdx.x, threadIdx.y, pkt_id);
 
+    __threadfence_block();
     __syncthreads();
 
-    while(*running) {
+    while(1) {
         if(!(threadIdx.x|threadIdx.y)) {
-            __threadfence();
             while(*running&((((*pkts_mask)>>pkt_id)&1LU)==0LU)) __threadfence();
+            if(!*running)
+                stop=1;
+
             c_pkts_mask=*pkts_mask;
             c_done_pkts=0;
             //printf("[%u] new copies: c_pkts_mask: %04lX c_done_pkts: %04lX\n", pkt_id, c_pkts_mask, c_done_pkts);
@@ -340,6 +353,9 @@ __global__ void bv_search(   uint32_t **__restrict__ ranges,  uint64_t *num_rang
 
         __syncthreads();
 
+        if(stop)
+            goto exit;
+
         field_found[threadIdx.y][threadIdx.x]=false;
 
         const uint32_t ptype_a=pkts_type[pkt_id]&ptype_mask[threadIdx.x];
@@ -349,7 +365,8 @@ __global__ void bv_search(   uint32_t **__restrict__ ranges,  uint64_t *num_rang
 
 
         if((c_pkts_mask>>pkt_id)&1LU& ptype_matches) {
-            pkt=(uint8_t * ) pkts[pkt_id]+offsets[threadIdx.x];
+            uint v;
+            const uint8_t *pkt=(uint8_t * ) pkts[pkt_id]+offsets[threadIdx.x];
             switch(sizes[threadIdx.x]) {
             case 1:
                 v=*pkt;
@@ -365,7 +382,7 @@ __global__ void bv_search(   uint32_t **__restrict__ ranges,  uint64_t *num_rang
                 break;
             }
 
-            uint *range_dim=ranges[threadIdx.x];
+            const uint *range_dim=ranges[threadIdx.x];
             long se[]= {0, (long) num_ranges[threadIdx.x]};
             uint8_t l,r;
             bv[threadIdx.y][threadIdx.x]=NULL;
@@ -382,7 +399,7 @@ __global__ void bv_search(   uint32_t **__restrict__ ranges,  uint64_t *num_rang
             }
         }
 
-        __syncwarp();
+        __syncthreads();
         if((c_pkts_mask>>pkt_id)&1 & (!threadIdx.x)) {
             uint x, pos;
             for(uint i=0; i<bv_bs; ++i) {
@@ -413,12 +430,13 @@ end:
             //printf("[%u] setting done_pkts with: %04lX\n", pkt_id, c_done_pkts);
             atomicOr((unsigned long long int *) done_pkts, c_done_pkts);
             //printf("[%u] done_pkts: %016lX\n", pkt_id, *done_pkts);
+            //__threadfence_system();
         }
+
         __syncthreads();
     }
 
-
-    __syncthreads();
+exit:
     if(!(threadIdx.x|threadIdx.y|blockIdx.x))
         printf("CUDA kernel stopped\n");
 }
@@ -463,7 +481,8 @@ static int rte_table_bv_lookup(void *t_r, struct rte_mbuf **pkts, uint64_t pkts_
     __atomic_store_n(t->pkts_mask_h, pkts_mask, __ATOMIC_RELAXED);
 
     //printf("POLLING: %lX pkts_mask: %lX\n", __atomic_load_n(t->done_pkts_h, __ATOMIC_RELAXED), pkts_mask);
-    while(__atomic_load_n(t->done_pkts_h, __ATOMIC_RELAXED)!=pkts_mask);
+    //while(__atomic_load_n(t->done_pkts_h, __ATOMIC_RELAXED)!=pkts_mask);
+    while(*ONCE(t->done_pkts_h)!=pkts_mask);
     //printf("POLLED: %lX pkts_mask: %lX\n", __atomic_load_n(t->done_pkts_h, __ATOMIC_RELAXED), pkts_mask);
 
     *lookup_hit_mask=*(t->lookup_hit_mask_h);
