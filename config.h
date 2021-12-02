@@ -9,7 +9,7 @@
 #define DEFAULT_NB_RX_DESC 2048
 #define DEFAULT_NB_TX_DESC 2048
 
-#define BURST_SIZE 32
+#define BURST_SIZE 64
 
 #define GPU_PAGE_SIZE (1U<<16)
 
