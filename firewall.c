@@ -145,7 +145,7 @@ static int firewall(void *arg) {
             j=0;
 
             for(; i<nb_rx; ++i) {
-                if(unlikely((*lookup_hit_mask>>i)&1&(conf->actions[positions[i]]==RULE_DROP)))
+                if(unlikely(((*lookup_hit_mask>>i)&1)&&(conf->actions[positions[i]]==RULE_DROP)))
                     continue;
 
                 bufs_tx[j++]=bufs_rx[i];
@@ -322,7 +322,7 @@ int main(int ac, char *as[]) {
     printf("done starting kernel\n");
 
     fw_conf=(firewall_conf_t) {
-        .table=table, .actions=ruleset.actions, .tap_macaddr=&tap_macaddr, .stats=port_stats
+        .table=table, .actions=ruleset.actions, .tap_macaddr=NULL, .stats=port_stats
     };
 
     uint16_t coreid=rte_get_next_lcore(rte_get_main_lcore(), 1, 1);

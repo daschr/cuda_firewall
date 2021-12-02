@@ -323,12 +323,13 @@ __global__ void bv_search(	uint32_t **__restrict__ ranges, const uint64_t *__res
 
     __shared__ uint64_t c_pkts_mask;
     __shared__ uint64_t c_done_pkts;
+    __shared__ uint64_t c_lookup_hit_mask;
     __shared__ uint8_t stop;
 
     if(!(threadIdx.x|threadIdx.y))
         stop=0;
 
-    const uint pkt_id=blockIdx.x*blockDim.y+threadIdx.y;
+    const int pkt_id=blockIdx.x*blockDim.y+threadIdx.y;
     const uint64_t reset_block_mask=~(0xffffLU<<pkt_id);
 
 //	printf("blockDim.x: %d blockDim.y: %d blockIdx.x: %d threadIdx.y: %d, pkt_id: %u\n", blockDim.x, blockDim.y, blockIdx.x, threadIdx.y, pkt_id);
@@ -343,11 +344,9 @@ __global__ void bv_search(	uint32_t **__restrict__ ranges, const uint64_t *__res
                 stop=1;
 
             c_pkts_mask=*pkts_mask;
+            c_lookup_hit_mask=0;
             c_done_pkts=0;
-            //printf("[%u] new copies: c_pkts_mask: %04lX c_done_pkts: %04lX\n", pkt_id, c_pkts_mask, c_done_pkts);
-            //printf("[%u] resetting done_pkts with: %016lX\n", pkt_id, ~(0xffffLU<<pkt_id));
             atomicAnd((unsigned long long int *) done_pkts, reset_block_mask);
-            //printf("[%u] done waiting for done_pkts...\n", pkt_id);
             __threadfence_block();
         }
 
@@ -402,9 +401,9 @@ __global__ void bv_search(	uint32_t **__restrict__ ranges, const uint64_t *__res
         __syncthreads();
         if((c_pkts_mask>>pkt_id)&1 & (!threadIdx.x)) {
             uint x, pos;
-            for(uint i=0; i<bv_bs; ++i) {
+            for(int i=0; i<bv_bs; ++i) {
                 x=0xffffffff;
-                for(uint b=0; b<blockDim.x; ++b) {
+                for(int b=0; b<blockDim.x; ++b) {
                     if(!field_found[threadIdx.y][b])
                         goto end;
                     x&=bv[threadIdx.y][b][i];
@@ -412,7 +411,8 @@ __global__ void bv_search(	uint32_t **__restrict__ ranges, const uint64_t *__res
 
                 if((pos=__ffs(x))!=0) {
                     positions[pkt_id]=(i<<5)+pos-1;
-                    atomicOr((unsigned long long int *)lookup_hit_mask, 1LU<<pkt_id);
+                    __threadfence(); // sync global write on device
+                    atomicOr((unsigned long long int *)&c_lookup_hit_mask, 1LU<<pkt_id);
                     break;
                 }
             }
@@ -421,16 +421,14 @@ end:
             atomicOr((unsigned long long int *) &c_done_pkts, 1LU<<pkt_id);
         }
 
-
         __syncthreads();
         if(!(threadIdx.x|threadIdx.y)) {
-            //printf("[%u] resetting pkts_mask with: %016lX\n", pkt_id, ~(0xffffLU<<pkt_id));
             atomicAnd((unsigned long long int *) pkts_mask, reset_block_mask);
-            //printf("[%u] pkts_mask: %016lX\n", pkt_id, *pkts_mask);
-            //printf("[%u] setting done_pkts with: %04lX\n", pkt_id, c_done_pkts);
+            atomicOr((unsigned long long int *) lookup_hit_mask, c_lookup_hit_mask);
+
+            __threadfence_system(); // sync global writes on host, make sure everything other is written except done_pkts
             atomicOr((unsigned long long int *) done_pkts, c_done_pkts);
-            //printf("[%u] done_pkts: %016lX\n", pkt_id, *done_pkts);
-            //__threadfence_system();
+            __threadfence_system(); // sync global writes on host
         }
 
         __syncthreads();
@@ -477,19 +475,16 @@ static int rte_table_bv_lookup(void *t_r, struct rte_mbuf **pkts, uint64_t pkts_
             t->packet_types_h[i]=pkts[i]->packet_type;
         }
 
-    __atomic_store_n(t->done_pkts_h, 0LU, __ATOMIC_RELAXED);
-    __atomic_store_n(t->pkts_mask_h, pkts_mask, __ATOMIC_RELAXED);
+    *ONCE(t->lookup_hit_mask_h)=0LU;
+    *ONCE(t->done_pkts_h)=0LU;
+    *ONCE(t->pkts_mask_h)=pkts_mask;
 
-    //printf("POLLING: %lX pkts_mask: %lX\n", __atomic_load_n(t->done_pkts_h, __ATOMIC_RELAXED), pkts_mask);
-    //while(__atomic_load_n(t->done_pkts_h, __ATOMIC_RELAXED)!=pkts_mask);
     while(*ONCE(t->done_pkts_h)!=pkts_mask);
-    //printf("POLLED: %lX pkts_mask: %lX\n", __atomic_load_n(t->done_pkts_h, __ATOMIC_RELAXED), pkts_mask);
 
-    *lookup_hit_mask=*(t->lookup_hit_mask_h);
-    memcpy(e, (const void *) t->positions_h, sizeof(uint32_t)*__builtin_popcountll(*t->lookup_hit_mask_h));
+    *lookup_hit_mask=*ONCE(t->lookup_hit_mask_h);
+    memcpy(e, (const void *) t->positions_h, sizeof(uint32_t)*__builtin_popcountll(*ONCE(t->lookup_hit_mask_h)));
 
-    RTE_TABLE_BV_STATS_PKTS_LOOKUP_MISS(t, n_pkts_in-__builtin_popcountll(*t->lookup_hit_mask_h));
-    __atomic_store_n(t->lookup_hit_mask_h, 0LU, __ATOMIC_RELAXED);
+    RTE_TABLE_BV_STATS_PKTS_LOOKUP_MISS(t, n_pkts_in-__builtin_popcountll(*ONCE(t->lookup_hit_mask_h)));
 
     /*
         cudaError_t err = cudaGetLastError();
