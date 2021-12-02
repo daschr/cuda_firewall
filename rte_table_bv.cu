@@ -324,15 +324,13 @@ __global__ void bv_search(	uint32_t **__restrict__ ranges, const uint64_t *__res
     __shared__ uint64_t c_pkts_mask;
     __shared__ uint64_t c_done_pkts;
     __shared__ uint64_t c_lookup_hit_mask;
-    __shared__ uint8_t stop;
+    volatile __shared__ uint8_t stop;
 
     if(!(threadIdx.x|threadIdx.y))
         stop=0;
 
     const int pkt_id=blockIdx.x*blockDim.y+threadIdx.y;
     const uint64_t reset_block_mask=~(0xffffLU<<pkt_id);
-
-//	printf("blockDim.x: %d blockDim.y: %d blockIdx.x: %d threadIdx.y: %d, pkt_id: %u\n", blockDim.x, blockDim.y, blockIdx.x, threadIdx.y, pkt_id);
 
     __threadfence_block();
     __syncthreads();
@@ -347,7 +345,6 @@ __global__ void bv_search(	uint32_t **__restrict__ ranges, const uint64_t *__res
             c_lookup_hit_mask=0;
             c_done_pkts=0;
             atomicAnd((unsigned long long int *) done_pkts, reset_block_mask);
-            __threadfence_block();
         }
 
         __syncthreads();
@@ -411,7 +408,6 @@ __global__ void bv_search(	uint32_t **__restrict__ ranges, const uint64_t *__res
 
                 if((pos=__ffs(x))!=0) {
                     positions[pkt_id]=(i<<5)+pos-1;
-                    __threadfence(); // sync global write on device
                     atomicOr((unsigned long long int *)&c_lookup_hit_mask, 1LU<<pkt_id);
                     break;
                 }
