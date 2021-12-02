@@ -321,7 +321,7 @@ __global__ void bv_search(	uint32_t **__restrict__ ranges, const uint64_t *__res
     __shared__ uint *bv[16][RTE_TABLE_BV_MAX_FIELDS];
     __shared__ bool field_found[16][RTE_TABLE_BV_MAX_FIELDS];
 
-    __shared__ uint64_t c_pkts_mask;
+    volatile __shared__ uint64_t c_pkts_mask;
     __shared__ uint64_t c_done_pkts;
     __shared__ uint64_t c_lookup_hit_mask;
     volatile __shared__ uint8_t stop;
@@ -337,7 +337,7 @@ __global__ void bv_search(	uint32_t **__restrict__ ranges, const uint64_t *__res
 
     while(1) {
         if(!(threadIdx.x|threadIdx.y)) {
-            while(*running&((((*pkts_mask)>>pkt_id)&1LU)==0LU)) __threadfence();
+            while(*running&(((*pkts_mask>>pkt_id)&1LU)==0));
             if(!*running)
                 stop=1;
 
@@ -471,13 +471,13 @@ static int rte_table_bv_lookup(void *t_r, struct rte_mbuf **pkts, uint64_t pkts_
             t->packet_types_h[i]=pkts[i]->packet_type;
         }
 
-    *ONCE(t->lookup_hit_mask_h)=0LU;
-    *ONCE(t->done_pkts_h)=0LU;
-    *ONCE(t->pkts_mask_h)=pkts_mask;
+    ONCE(*t->lookup_hit_mask_h)=0LU;
+    ONCE(*t->done_pkts_h)=0LU;
+    ONCE(*t->pkts_mask_h)=pkts_mask;
 
     while(*ONCE(t->done_pkts_h)!=pkts_mask);
 
-    *lookup_hit_mask=*ONCE(t->lookup_hit_mask_h);
+    *lookup_hit_mask=ONCE(*t->lookup_hit_mask_h);
     memcpy(e, (const void *) t->positions_h, sizeof(uint32_t)*__builtin_popcountll(*ONCE(t->lookup_hit_mask_h)));
 
     RTE_TABLE_BV_STATS_PKTS_LOOKUP_MISS(t, n_pkts_in-__builtin_popcountll(*ONCE(t->lookup_hit_mask_h)));
