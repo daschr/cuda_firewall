@@ -73,9 +73,9 @@ static int rte_table_bv_free(void *t_r) {
     cudaFree(t->field_offsets);
     cudaFree(t->field_ptype_masks);
     cudaFree(t->field_sizes);
-	
-	cudaFreeHost(t->pkts_data_h);
-	cudaFreeHost(t->packet_types_h);
+
+    cudaFreeHost(t->pkts_data_h);
+    cudaFreeHost(t->packet_types_h);
 
     for(uint32_t i=0; i<t->num_fields; ++i)
         rte_bv_markers_free(t->bv_markers+i);
@@ -265,16 +265,16 @@ static int rte_table_bv_entry_delete_bulk(void  *t_r, void **ks_r, uint32_t n_ke
     return 0;
 }
 
-__global__ void bv_search(	 uint32_t **ranges,  uint64_t *num_ranges,  uint32_t *offsets,  uint8_t *sizes,
-                             uint32_t *ptype_mask,  uint32_t **bvs, const uint32_t bv_bs,
+__global__ void bv_search(	 uint32_t **ranges,  uint64_t *__restrict__ num_ranges,  uint32_t *__restrict__ offsets,  uint8_t *__restrict__ sizes,
+                             uint32_t *__restrict__ ptype_mask,  uint32_t **bvs, const uint32_t bv_bs,
                              const ulong pkts_mask, uint8_t **pkts, uint32_t *__restrict__ pkts_type,
-                             volatile uint *__restrict__ positions, volatile ulong *__restrict__ lookup_hit_mask) {
+                             uint *__restrict__ positions, ulong *__restrict__ lookup_hit_mask) {
 
     if(!((pkts_mask>>blockIdx.x)&1))
         return;
 
-    uint8_t *pkt;
-    __shared__ uint *bv[24];
+    const uint8_t *pkt;
+    const __shared__ uint *bv[24];
     __shared__ bool field_found[24];
     uint v=0;
 
@@ -303,7 +303,7 @@ __global__ void bv_search(	 uint32_t **ranges,  uint64_t *num_ranges,  uint32_t 
             break;
         }
 
-        uint *range_dim=ranges[threadIdx.x];
+        const uint *range_dim=ranges[threadIdx.x];
         long long int se[]= {0, (long long int) num_ranges[threadIdx.x]};
         uint8_t l,r;
         bv[threadIdx.x]=NULL;
@@ -322,6 +322,7 @@ __global__ void bv_search(	 uint32_t **ranges,  uint64_t *num_ranges,  uint32_t 
         }
     }
 
+    __threadfence_block();
     __syncthreads();
     if(!threadIdx.x) {
         uint x, pos;
@@ -385,6 +386,7 @@ static int rte_table_bv_lookup(void *t_r, struct rte_mbuf **pkts, uint64_t pkts_
             t->pkts_data_h[i]=rte_pktmbuf_mtod(pkts[i], uint8_t *);
             t->packet_types_h[i]=pkts[i]->packet_type;
         }
+
 
     bv_search<<<64, t->num_fields>>>(	t->ranges_dev, t->num_ranges,
                                         t->field_offsets, t->field_sizes, t->field_ptype_masks,
