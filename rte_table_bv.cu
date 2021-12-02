@@ -337,7 +337,7 @@ __global__ void bv_search(	uint32_t **__restrict__ ranges, const uint64_t *__res
 
     while(1) {
         if(!(threadIdx.x|threadIdx.y)) {
-            while(*running&(((*pkts_mask>>pkt_id)&1LU)==0));
+            while(*running&(((*pkts_mask>>pkt_id)&1LU)==0)) __nanosleep(1);
             if(!*running)
                 stop=1;
 
@@ -358,7 +358,7 @@ __global__ void bv_search(	uint32_t **__restrict__ ranges, const uint64_t *__res
         const bool ptype_matches=  (ptype_a&RTE_PTYPE_L2_MASK)!=0
                                    & (ptype_a&RTE_PTYPE_L3_MASK)!=0
                                    & (ptype_a&RTE_PTYPE_L4_MASK)!=0;
-
+		
 
         if((c_pkts_mask>>pkt_id)&1LU& ptype_matches) {
             uint v;
