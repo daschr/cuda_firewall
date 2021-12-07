@@ -11,6 +11,10 @@ extern "C" {
 #include <stdlib.h>
 #include <stdint.h>
 
+#define RTE_TABLE_BV_NUM_BLOCKS 1
+#define RTE_TABLE_BV_NUM_Y_THREADS 64
+#define RTE_TABLE_BV_RESET_MASK 0xfffffffffffffffffLU
+
 #ifdef RTE_TABLE_STATS_COLLECT
 
 #define RTE_TABLE_BV_STATS_PKTS_IN_ADD(table, val) table->stats.n_pkts_in += val
@@ -340,8 +344,8 @@ __global__ void bv_search(	uint32_t **__restrict__ ranges, const uint64_t *__res
                             volatile uint64_t *__restrict__ done_pkts, volatile uint64_t *__restrict__ done_pkts_dev,
                             volatile uint8_t *__restrict__ running) {
 
-    __shared__ uint *bv[16][RTE_TABLE_BV_MAX_FIELDS];
-    __shared__ bool field_found[16][RTE_TABLE_BV_MAX_FIELDS];
+    __shared__ uint *bv[RTE_TABLE_BV_NUM_Y_THREADS][RTE_TABLE_BV_MAX_FIELDS];
+    __shared__ bool field_found[RTE_TABLE_BV_NUM_Y_THREADS][RTE_TABLE_BV_MAX_FIELDS];
 
     volatile __shared__ uint64_t c_pkts_mask;
     __shared__ uint64_t c_done_pkts;
@@ -352,7 +356,7 @@ __global__ void bv_search(	uint32_t **__restrict__ ranges, const uint64_t *__res
         stop=0;
 
     const int pkt_id=blockIdx.x*blockDim.y+threadIdx.y;
-    const uint64_t reset_block_mask=~(0xffffLU<<pkt_id);
+    const uint64_t reset_block_mask=~(RTE_TABLE_BV_RESET_MASK<<pkt_id);
 
     __threadfence_block();
     __syncthreads();
@@ -461,7 +465,7 @@ int rte_table_bv_start_kernel(void *t_r) {
     struct rte_table_bv *t=(struct rte_table_bv *) t_r;
     *t->running_h=1;
 
-    bv_search<<<4, dim3{t->num_fields,16}>>>(   t->ranges_dev, t->num_ranges,
+    bv_search<<<RTE_TABLE_BV_NUM_BLOCKS, dim3{t->num_fields,RTE_TABLE_BV_NUM_Y_THREADS}>>>(   t->ranges_dev, t->num_ranges,
             t->field_offsets, t->field_sizes, t->field_ptype_masks,
             t->bvs_dev, RTE_TABLE_BV_BS,
             t->pkts_mask, (volatile uint8_t **) t->pkts_data, t->packet_types,
