@@ -309,6 +309,28 @@ static int rte_table_bv_entry_delete_bulk(void  *t_r, void **ks_r, uint32_t n_ke
     return 0;
 }
 
+__device__ long bin_search(const uint *__restrict__ range, const long num_ranges, const uint v) {
+    if(!threadIdx.x)
+        printf("sizeof(long): %lu\n", sizeof(long));
+
+    unsigned mask;
+    long se[]= {0, num_ranges>>5};
+    uint8_t l=0,r=0;
+    long j;
+
+    for(long i=se[1]>>1; se[0]<=se[1]; i=(se[0]+se[1])>>1) {
+        j=((i<<5)+(long) threadIdx.x)<<1;
+        l=j>=num_ranges?v>=range[j]:0;
+        r=(j|1)>=num_ranges?v<=range[j|1]:0;
+        if((mask=__any_sync(UINT32_MAX, l&r))) {
+            return __shfl_sync(UINT32_MAX, i, __popc(mask));
+        }
+        se[!l]=!l?i-1:i+1;
+    }
+
+    return -1;
+}
+
 __global__ void bv_search(	uint32_t **__restrict__ ranges, const uint64_t *__restrict__ num_ranges,
                             const uint32_t *__restrict__ offsets, const uint8_t *__restrict__ sizes,
                             const uint32_t *__restrict__ ptype_mask,  uint32_t **__restrict__ bvs,
@@ -358,7 +380,7 @@ __global__ void bv_search(	uint32_t **__restrict__ ranges, const uint64_t *__res
         const bool ptype_matches=  (ptype_a&RTE_PTYPE_L2_MASK)!=0
                                    & (ptype_a&RTE_PTYPE_L3_MASK)!=0
                                    & (ptype_a&RTE_PTYPE_L4_MASK)!=0;
-		
+
 
         if((c_pkts_mask>>pkt_id)&1LU& ptype_matches) {
             uint v;
@@ -368,10 +390,10 @@ __global__ void bv_search(	uint32_t **__restrict__ ranges, const uint64_t *__res
                 v=*pkt;
                 break;
             case 2:
-                v=pkt[1]+(pkt[0]<<8);
+                v=pkt[1]|(pkt[0]<<8);
                 break;
             case 4:
-                v=pkt[3]+(pkt[2]<<8)+(pkt[1]<<16)+(pkt[0]<<24);
+                v=pkt[3]|(pkt[2]<<8)|(pkt[1]<<16)|(pkt[0]<<24);
                 break;
             default:
                 printf("[%d|%d] unknown size: %u byte\n", blockIdx.x, threadIdx.x, sizes[threadIdx.x]);
@@ -384,7 +406,7 @@ __global__ void bv_search(	uint32_t **__restrict__ ranges, const uint64_t *__res
             bv[threadIdx.y][threadIdx.x]=NULL;
             for(long i=se[1]>>1; se[0]<=se[1]; i=(se[0]+se[1])>>1) {
                 l=v>=range_dim[i<<1];
-                r=v<=range_dim[(i<<1)+1];
+                r=v<=range_dim[(i<<1)|1];
                 if(l&r) {
                     bv[threadIdx.y][threadIdx.x]=bvs[threadIdx.x]+i*RTE_TABLE_BV_BS;
                     field_found[threadIdx.y][threadIdx.x]=true;
