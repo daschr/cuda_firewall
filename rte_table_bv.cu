@@ -269,10 +269,8 @@ __global__ void bv_search(	 uint32_t **ranges,  uint64_t *num_ranges,  uint32_t 
     if(!((pkts_mask>>blockIdx.x)&1))
         return;
 
-    uint8_t *pkt;
     __shared__ uint *bv[24];
     __shared__ bool field_found[24];
-    uint v=0;
 
     field_found[threadIdx.x]=false;
 
@@ -282,31 +280,32 @@ __global__ void bv_search(	 uint32_t **ranges,  uint64_t *num_ranges,  uint32_t 
                                & (ptype_a&RTE_PTYPE_L4_MASK)!=0;
 
     if(ptype_matches) {
-        pkt=pkts[blockIdx.x]+offsets[threadIdx.x];
+        const uint8_t *pkt=pkts[blockIdx.x]+offsets[threadIdx.x];
+        uint v;
 
         switch(sizes[threadIdx.x]) {
         case 1:
             v=*pkt;
             break;
         case 2:
-            v=pkt[1]+(pkt[0]<<8);
+            v=pkt[1]|(pkt[0]<<8);
             break;
         case 4:
-            v=pkt[3]+(pkt[2]<<8)+(pkt[1]<<16)+(pkt[0]<<24);
+            v=pkt[3]|(pkt[2]<<8)|(pkt[1]<<16)|(pkt[0]<<24);
             break;
         default:
             printf("[%d|%d] unknown size: %ubit\n", blockIdx.x, threadIdx.x, sizes[threadIdx.x]);
             break;
         }
 
-        uint *range_dim=ranges[threadIdx.x];
+
         long long int se[]= {0, (long long int) num_ranges[threadIdx.x]};
         uint8_t l,r;
-        bv[threadIdx.x]=NULL;
+        const uint *range_dim=ranges[threadIdx.x];
 
         for(long long int i=se[1]>>1; se[0]<=se[1]; i=(se[0]+se[1])>>1) {
             l=v>=range_dim[i<<1];
-            r=v<=range_dim[(i<<1)+1];
+            r=v<=range_dim[(i<<1)|1];
 
             if(l&r) {
                 bv[threadIdx.x]=bvs[threadIdx.x]+i*RTE_TABLE_BV_BS;
