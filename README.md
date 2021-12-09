@@ -19,6 +19,11 @@ Implementing a Firewall using dpdk and CUDA
 
  <font size="1"> *tested using iperf3 and two Mellanox ConnectX-3 NICs (40GigE)</font> 
 
+# settings
+* use `isolcpus` to isolate at least two adjacent logical cores
+* force device managed flow steering, f.e. for Mellanox ConnectX-3: `mlx4_core.log_num_mgm_entry_size=-1`
+* example: `GRUB_CMDLINE_LINUX_DEFAULT="quiet isolcpus=2,3 mlx4_core.log_num_mgm_entry_size=-1"`
+
 # usage
 
 * build dpdk (>=21.08)
