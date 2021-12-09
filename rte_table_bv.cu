@@ -305,7 +305,6 @@ __global__ void bv_search(	 uint32_t **ranges,  uint64_t *__restrict__ num_range
 		const uint *range_dim=ranges[threadIdx.x];
         long long int se[]= {0, (long long int) num_ranges[threadIdx.x]};
         uint8_t l,r;
-        const uint *range_dim=ranges[threadIdx.x];
 
         for(long long int i=se[1]>>1; se[0]<=se[1]; i=(se[0]+se[1])>>1) {
             l=v>=range_dim[i<<1];
