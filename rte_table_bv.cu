@@ -388,8 +388,8 @@ __global__ void bv_search(	uint32_t **__restrict__ ranges, const uint64_t *__res
 
         if((c_pkts_mask>>pkt_id)&1LU& ptype_matches) {
             uint v;
-            const uint8_t *pkt=(uint8_t * ) pkts[pkt_id]+offsets[threadIdx.x];
-            switch(sizes[threadIdx.x]) {
+            const uint8_t *pkt=(uint8_t * ) pkts[pkt_id]+__ldg(&offsets[threadIdx.x]);
+            switch(__ldg(&sizes[threadIdx.x])) {
             case 1:
                 v=*pkt;
                 break;
@@ -405,12 +405,12 @@ __global__ void bv_search(	uint32_t **__restrict__ ranges, const uint64_t *__res
             }
 
             const uint *range_dim=ranges[threadIdx.x];
-            long se[]= {0, (long) num_ranges[threadIdx.x]};
+            long se[]= {0, (long) __ldg(&num_ranges[threadIdx.x])};
             uint8_t l,r;
             bv[threadIdx.y][threadIdx.x]=NULL;
             for(long i=se[1]>>1; se[0]<=se[1]; i=(se[0]+se[1])>>1) {
-                l=v>=range_dim[i<<1];
-                r=v<=range_dim[(i<<1)|1];
+                l=v>=__ldg(&range_dim[i<<1]);
+                r=v<=__ldg(&range_dim[(i<<1)|1]);
                 if(l&r) {
                     bv[threadIdx.y][threadIdx.x]=bvs[threadIdx.x]+i*RTE_TABLE_BV_BS;
                     field_found[threadIdx.y][threadIdx.x]=true;
