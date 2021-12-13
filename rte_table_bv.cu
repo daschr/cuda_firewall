@@ -12,8 +12,6 @@ extern "C" {
 
 #define RTE_TABLE_BV_NUM_BLOCKS 1
 #define RTE_TABLE_BV_NUM_Y_THREADS 64
-#define RTE_TABLE_BV_RESET_MASK 0xfffffffffffffffffLU
-
 
 #ifdef RTE_TABLE_STATS_COLLECT
 #define RTE_TABLE_BV_STATS_PKTS_IN_ADD(table, val) table->stats.n_pkts_in += val
