@@ -122,7 +122,8 @@ static int firewall(void *arg) {
 
         struct rte_mbuf *bufs_tx[BURST_SIZE];
 
-        const int (*lookup) (void *, struct rte_mbuf **, uint64_t, uint64_t *, void **)=rte_table_bv_ops.f_lookup;
+        cudaStream_t stream;
+        cudaStreamCreate(&stream);
 
         int16_t i,j;
 
@@ -135,7 +136,7 @@ static int firewall(void *arg) {
 
             pkts_mask=nb_rx==64?UINT64_MAX:((1LU<<nb_rx)-1);
 
-            lookup(conf->table, bufs_rx_d, pkts_mask, (uint64_t *) lookup_hit_mask_d, (void **) positions_d);
+            rte_table_bv_lookup_stream(conf->table, stream, bufs_rx_d, pkts_mask, (uint64_t *) lookup_hit_mask_d, (void **) positions_d);
 
             i=0;
             j=0;
