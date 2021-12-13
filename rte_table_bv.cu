@@ -275,8 +275,7 @@ __global__ void bv_search(	const uint32_t *__restrict__ const *__restrict__ rang
                             const ulong pkts_mask, const uint8_t *__restrict__ const *__restrict__ pkts, const uint32_t *__restrict__ pkts_type,
                             uint *__restrict__ positions, ulong *__restrict__ lookup_hit_mask) {
 
-    __shared__ const uint *bv[64][RTE_TABLE_BV_MAX_FIELDS];
-
+    __shared__ const uint *bv[RTE_TABLE_BV_MAX_PKTS][RTE_TABLE_BV_MAX_FIELDS];
     __shared__ uint64_t c_pkts_mask;
     __shared__ uint64_t c_lookup_hit_mask;
 
@@ -285,25 +284,22 @@ __global__ void bv_search(	const uint32_t *__restrict__ const *__restrict__ rang
         c_lookup_hit_mask=0;
     }
 
-    __syncthreads();
-
-
     const int pkt_id=(blockDim.y*blockIdx.x+threadIdx.y);
 
-#define ptype_a (pkts_type[pkt_id]& *ptype_mask)
-    const bool ptype_matches=  (ptype_a&RTE_PTYPE_L2_MASK)!=0
-                               & (ptype_a&RTE_PTYPE_L3_MASK)!=0
-                               & (ptype_a&RTE_PTYPE_L4_MASK)!=0;
+    __syncthreads();
+
+#define ptype_a (__ldg(&pkts_type[pkt_id])& __ldg(ptype_mask))
+    const bool do_search=  	(c_pkts_mask>>pkt_id)&1
+                            & (ptype_a&RTE_PTYPE_L2_MASK)!=0
+                            & (ptype_a&RTE_PTYPE_L3_MASK)!=0
+                            & (ptype_a&RTE_PTYPE_L4_MASK)!=0;
 #undef ptype_a
 
-
-    if(ptype_matches & (c_pkts_mask>>threadIdx.y)) {
+    if(do_search) {
         for(int field_id=0; field_id<num_fields; ++field_id) {
             if(!threadIdx.x) {
                 bv[pkt_id][field_id]=NULL;
             }
-            __syncwarp();
-
             uint v;
             const uint8_t *pkt=(uint8_t * ) pkts[pkt_id]+offsets[field_id];
             switch(sizes[field_id]) {
@@ -325,14 +321,16 @@ __global__ void bv_search(	const uint32_t *__restrict__ const *__restrict__ rang
             uint32_t l,r;
             __syncwarp();
             for(long i=se[1]>>1; se[0]<=se[1]; i=(se[0]+se[1])>>1) {
-                l=__ballot_sync(UINT32_MAX, ((i<<5)|threadIdx.x)<num_ranges[field_id]?v>=ranges[field_id][((i<<5)|threadIdx.x)<<1]:0);
-                r=__ballot_sync(UINT32_MAX, ((i<<5)|threadIdx.x)<num_ranges[field_id]?v<=ranges[field_id][(((i<<5)|threadIdx.x)<<1)|1]:0);
+#define j ((i<<5)|threadIdx.x)
+                l=__ballot_sync(UINT32_MAX, j<num_ranges[field_id]?v>=ranges[field_id][j<<1]:0);
+                r=__ballot_sync(UINT32_MAX, j<num_ranges[field_id]?v<=ranges[field_id][(j<<1)|1]:0);
                 if(l&r) {
                     if((__ffs(l&r)-1)==threadIdx.x) {
-                        bv[pkt_id][field_id]=bvs[field_id]+((i<<5)|threadIdx.x)*RTE_TABLE_BV_BS;
+                        bv[pkt_id][field_id]=bvs[field_id]+j*RTE_TABLE_BV_BS;
                     }
                     break;
                 }
+#undef j
 
                 se[!l]=!l?i-1:i+1;
                 __syncwarp();
@@ -366,7 +364,7 @@ end:
 
     __syncthreads();
 
-    if(!(threadIdx.x|threadIdx.y|threadIdx.y)) {
+    if(!(threadIdx.x|threadIdx.y|threadIdx.z)) {
         atomicOr((unsigned long long int *) lookup_hit_mask, c_lookup_hit_mask);
         __threadfence_system();
     }
