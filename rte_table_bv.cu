@@ -310,7 +310,7 @@ __global__ void bv_search(	const uint32_t *__restrict__ const *__restrict__ rang
 
     if(do_search) {
         for(int field_id=0; field_id<num_fields; ++field_id) {
-        	uint v;
+            uint v;
             if(!threadIdx.x) {
                 bv[pkt_id][field_id]=NULL;
                 const uint8_t *pkt=(uint8_t * ) pkts[pkt_id]+offsets[field_id];
@@ -334,8 +334,9 @@ __global__ void bv_search(	const uint32_t *__restrict__ const *__restrict__ rang
             long se[]= {0, (long) num_ranges[field_id]>>5};
             uint32_t l,r;
             __syncwarp();
+
             for(long i=se[1]>>1; se[0]<=se[1]; i=(se[0]+se[1])>>1) {
-#define j ((i<<5)|threadIdx.x)
+                const long j=((i<<5)|threadIdx.x);
                 l=__ballot_sync(UINT32_MAX, j<num_ranges[field_id]?v>=ranges_from[field_id][j]:0);
                 r=__ballot_sync(UINT32_MAX, j<num_ranges[field_id]?v<=ranges_to[field_id][j]:0);
                 if(l&r) {
@@ -344,8 +345,6 @@ __global__ void bv_search(	const uint32_t *__restrict__ const *__restrict__ rang
                     }
                     break;
                 }
-#undef j
-
                 se[!l]=!l?i-1:i+1;
                 __syncwarp();
             }
