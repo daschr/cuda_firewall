@@ -137,16 +137,16 @@ inline void bv_unset_list(uint32_t *bv, size_t num_markers, const rte_bv_marker_
 }
 
 void rte_bv_add_range_host(rte_bv_ranges_t *ranges, uint32_t from, uint32_t to, size_t bv_size, const uint32_t *bv) {
-    ranges->ranges[ranges->num_ranges<<1]=from;
-    ranges->ranges[(ranges->num_ranges<<1)+1]=to;
+    ranges->ranges_from[ranges->num_ranges]=from;
+    ranges->ranges_to[ranges->num_ranges]=to;
     memcpy(ranges->bvs+(ranges->num_ranges*ranges->bv_bs), bv, sizeof(uint32_t)*bv_size);
     ++ranges->num_ranges;
 }
 
 void rte_bv_add_range_gpu(rte_bv_ranges_t *ranges, uint32_t from, uint32_t to, size_t bv_size, const uint32_t *bv) {
     //printf("%lu %08X %08X\n", ranges->num_ranges, from, to);
-    cudaMemcpy(ranges->ranges+(ranges->num_ranges<<1), &from, sizeof(uint32_t), cudaMemcpyHostToDevice);
-    cudaMemcpy(ranges->ranges+((ranges->num_ranges<<1)+1), &to, sizeof(uint32_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(ranges->ranges_from+ranges->num_ranges, &from, sizeof(uint32_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(ranges->ranges_to+ranges->num_ranges, &to, sizeof(uint32_t), cudaMemcpyHostToDevice);
     cudaMemcpy(ranges->bvs+(ranges->num_ranges*ranges->bv_bs), bv, sizeof(uint32_t)*bv_size, cudaMemcpyHostToDevice);
     ++ranges->num_ranges;
 }
