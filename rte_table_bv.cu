@@ -80,8 +80,8 @@ static int rte_table_bv_free(void *t_r) {
     cudaFree(t->field_offsets);
     cudaFree(t->ptype_mask);
     cudaFree(t->field_sizes);
-    cudaFree(t->entries);
 
+    cudaFreeHost(t->entries);
     cudaFreeHost(t->pkts_data_h);
     cudaFreeHost(t->packet_types_h);
 
@@ -122,7 +122,7 @@ static void *rte_table_bv_create(void *params, int socket_id, uint32_t entry_siz
     CHECK(cudaHostAlloc((void **) &t->packet_types_h, sizeof(uint32_t)*RTE_TABLE_BV_MAX_PKTS, cudaHostAllocMapped|cudaHostAllocWriteCombined));
     CHECK(cudaHostGetDevicePointer((void **) &t->packet_types, t->packet_types_h, 0));
 
-    CHECK(cudaMalloc((void **) &t->entries, t->entry_size*t->num_rules));
+    CHECK(cudaHostAlloc((void **) &t->entries, t->entry_size*t->num_rules, cudaHostAllocMapped));
 
     CHECK(cudaMalloc((void **) &t->ranges_from_dev, sizeof(uint32_t *)*t->num_fields));
     CHECK(cudaMalloc((void **) &t->ranges_to_dev, sizeof(uint32_t *)*t->num_fields));
@@ -293,9 +293,9 @@ static int rte_table_bv_entry_delete_bulk(void  *t_r, void **ks_r, uint32_t n_ke
 __global__ void bv_search(	const uint32_t *__restrict__ const *__restrict__ ranges_from, const uint32_t *__restrict__ const *__restrict__ ranges_to,
                             const uint64_t *__restrict__ num_ranges, const uint32_t *__restrict__ offsets,  const uint8_t *__restrict__ sizes,
                             const uint32_t *__restrict__ ptype_mask,  const uint32_t *__restrict__ const *__restrict__ bvs, const uint32_t bv_bs,
-                            const uint32_t num_fields, const uint32_t entry_size, void *__restrict__ entries,
+                            const uint32_t num_fields, const uint32_t entry_size, uint8_t *__restrict__ entries,
                             const ulong pkts_mask, const uint8_t *__restrict__ const *__restrict__ pkts, const uint32_t *__restrict__ pkts_type,
-                            void *__restrict__ matched_entries, ulong *__restrict__ lookup_hit_mask) {
+                            void *__restrict__ *matched_entries, ulong *__restrict__ lookup_hit_mask) {
 
     __shared__ const uint *bv[RTE_TABLE_BV_MAX_PKTS][RTE_TABLE_BV_MAX_FIELDS];
     __shared__ uint64_t c_pkts_mask;
@@ -371,21 +371,7 @@ __global__ void bv_search(	const uint32_t *__restrict__ const *__restrict__ rang
                 __syncwarp();
                 if((tm=__ballot_sync(UINT32_MAX, __ffs(x)))) {
                     if((__ffs(tm)-1)==threadIdx.x) {
-                        switch(entry_size) {
-                        case 1:
-                            ((uint8_t *) matched_entries)[pkt_id]=((uint8_t *) entries)[(bv_block<<5)+__ffs(x)-1];
-                            break;
-                        case 2:
-                            ((uint16_t *) matched_entries)[pkt_id]=((uint16_t *) entries)[(bv_block<<5)+__ffs(x)-1];
-                            break;
-                        case 4:
-                            ((uint32_t *) matched_entries)[pkt_id]=((uint32_t *) entries)[(bv_block<<5)+__ffs(x)-1];
-                            break;
-                        default:
-                            printf("[%d|%d] unknown entry_size: %u\n", threadIdx.x, threadIdx.y, entry_size);
-                            break;
-                        }
-
+                        matched_entries[pkt_id]=(void *) &entries[entry_size*((bv_block<<5)+__ffs(x)-1)];
                         //positions[pkt_id]=(bv_block<<5)+__ffs(x)-1;
                         atomicOr((unsigned long long int *)&c_lookup_hit_mask, 1LU<<pkt_id);
                     }

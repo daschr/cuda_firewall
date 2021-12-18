@@ -107,10 +107,10 @@ static int firewall(void *arg) {
 
     if(rte_lcore_id()&1) {
         volatile uint64_t *lookup_hit_mask, *lookup_hit_mask_d, pkts_mask;
-        volatile uint8_t *actions, *actions_d;
+        volatile uint8_t **actions, **actions_d;
 
-        cudaHostAlloc((void **) &actions, sizeof(uint8_t)*BURST_SIZE, cudaHostAllocMapped);
-        cudaHostGetDevicePointer((void **) &actions_d, (uint8_t *) actions, 0);
+        cudaHostAlloc((void **) &actions, sizeof(uint8_t *)*BURST_SIZE, cudaHostAllocMapped);
+        cudaHostGetDevicePointer((void **) &actions_d, (uint8_t **) actions, 0);
 
         cudaHostAlloc((void **) &lookup_hit_mask, sizeof(uint64_t), cudaHostAllocMapped);
         cudaHostGetDevicePointer((void **) &lookup_hit_mask_d, (uint64_t *) lookup_hit_mask, 0);
@@ -142,7 +142,15 @@ static int firewall(void *arg) {
             j=0;
 
             for(; i<nb_rx; ++i) {
-                if(unlikely((*lookup_hit_mask>>i)&1&(actions[i]==RULE_DROP)))
+                if(unlikely(!((*lookup_hit_mask>>i)&1))) {
+                    bufs_tx[j++]=bufs_rx[i];
+                    if(conf->tap_macaddr!=NULL)
+                        rte_memcpy(&(rte_pktmbuf_mtod(bufs_rx[i], struct rte_ether_hdr *)->dst_addr), conf->tap_macaddr, 6);
+
+                    continue;
+                }
+
+                if(unlikely(*(actions[i])==RULE_DROP))
                     continue;
 
                 bufs_tx[j++]=bufs_rx[i];
