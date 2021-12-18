@@ -37,6 +37,8 @@ struct rte_table_bv_field {
 
 struct rte_table_bv_params {
     uint32_t num_fields;
+    uint32_t num_rules; // max number of rules
+
     // size needs to be  >=num_fields
     const struct rte_table_bv_field_def *field_defs;
 };

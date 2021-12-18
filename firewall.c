@@ -107,10 +107,10 @@ static int firewall(void *arg) {
 
     if(rte_lcore_id()&1) {
         volatile uint64_t *lookup_hit_mask, *lookup_hit_mask_d, pkts_mask;
-        volatile uint32_t *positions, *positions_d;
+        volatile uint8_t *actions, *actions_d;
 
-        cudaHostAlloc((void **) &positions, sizeof(uint32_t)*BURST_SIZE, cudaHostAllocMapped);
-        cudaHostGetDevicePointer((void **) &positions_d, (uint32_t *) positions, 0);
+        cudaHostAlloc((void **) &actions, sizeof(uint8_t)*BURST_SIZE, cudaHostAllocMapped);
+        cudaHostGetDevicePointer((void **) &actions_d, (uint8_t *) actions, 0);
 
         cudaHostAlloc((void **) &lookup_hit_mask, sizeof(uint64_t), cudaHostAllocMapped);
         cudaHostGetDevicePointer((void **) &lookup_hit_mask_d, (uint64_t *) lookup_hit_mask, 0);
@@ -136,13 +136,13 @@ static int firewall(void *arg) {
 
             pkts_mask=nb_rx==64?UINT64_MAX:((1LU<<nb_rx)-1);
 
-            rte_table_bv_lookup_stream(conf->table, stream, bufs_rx_d, pkts_mask, (uint64_t *) lookup_hit_mask_d, (void **) positions_d);
+            rte_table_bv_lookup_stream(conf->table, stream, bufs_rx_d, pkts_mask, (uint64_t *) lookup_hit_mask_d, (void **) actions_d);
 
             i=0;
             j=0;
 
             for(; i<nb_rx; ++i) {
-                if(unlikely((*lookup_hit_mask>>i)&1&(conf->actions[positions[i]]==RULE_DROP)))
+                if(unlikely((*lookup_hit_mask>>i)&1&(actions[i]==RULE_DROP)))
                     continue;
 
                 bufs_tx[j++]=bufs_rx[i];
@@ -303,14 +303,20 @@ int main(int ac, char *as[]) {
         fdefs[i].size=fdefs_sizes[i];
     }
 
-    struct rte_table_bv_params table_params = { .num_fields=5, .field_defs=fdefs };
+    struct rte_table_bv_params table_params = { .num_fields=5, .field_defs=fdefs, .num_rules=40000 };
 
-    void *table=rte_table_bv_ops.f_create(&table_params, rte_socket_id(), 0);
+    void *table=rte_table_bv_ops.f_create(&table_params, rte_socket_id(), 1);
 
     if(table==NULL)
         goto err;
 
-    rte_table_bv_ops.f_add_bulk(table, (void **) ruleset.rules, NULL, ruleset.num_rules, NULL, NULL);
+    uint8_t **actions=rte_malloc("actions", ruleset.num_rules*sizeof(uint8_t *), sizeof(uint8_t *));
+    for(uint32_t i=0; i<ruleset.num_rules; ++i)
+        actions[i]=&ruleset.actions[i];
+
+    rte_table_bv_ops.f_add_bulk(table, (void **) ruleset.rules, (void **) actions, ruleset.num_rules, NULL, NULL);
+
+    rte_free(actions);
 
     free_ruleset_except_actions(&ruleset);
 

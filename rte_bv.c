@@ -29,7 +29,7 @@ int rte_bv_markers_create(rte_bv_markers_t *markers) {
         fprintf(stderr, "[rte_bv_markers_create|%d] error creating hash table: %s\n", __LINE__, rte_strerror(rte_errno));
         return 1;
     }
-
+	
     markers->max_value=0;
     markers->num_lists=0;
     ++c;
