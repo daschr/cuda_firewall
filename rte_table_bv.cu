@@ -55,7 +55,7 @@ struct rte_table_bv {
 
 static inline int is_error(cudaError_t e, const char *file, int line) {
     if(e!=cudaSuccess) {
-        fprintf(stderr, "[rte_table_bv] error: %s in %s (line %d)\n", cudaGetErrorString(e), file, line);
+        rte_log(RTE_LOG_ERR, RTE_LOGTYPE_TABLE, "[rte_table_bv] error: %s in %s (line %d)\n", cudaGetErrorString(e), file, line);
         return 1;
     }
     return 0;
@@ -155,7 +155,7 @@ static void *rte_table_bv_create(void *params, int socket_id, uint32_t entry_siz
     for(size_t i=0; i<t->num_fields; ++i) {
         if(rte_bv_markers_create(&t->bv_markers[i])) {
             rte_table_bv_free(t);
-            rte_log(RTE_LOG_ERR, RTE_LOGTYPE_HASH, "Error creating marker!\n");
+            rte_log(RTE_LOG_ERR, RTE_LOGTYPE_TABLE, "Error creating marker!\n");
             return NULL;
         }
     }
@@ -189,10 +189,12 @@ static inline void cal_from_to(uint32_t *from_to, uint32_t *v, uint8_t type, uin
     }
 }
 
-static int rte_table_bv_entry_add(void *t_r, void *k_r, void *e_r, int *key_found, void **e_ptr) {
+static int rte_table_bv_entry_add(void *t_r, void *k_r, void *e_r, int *key_found, __rte_unused void **e_ptr) {
     struct rte_table_bv *t=(struct rte_table_bv *) t_r;
     struct rte_table_bv_key *k=(struct rte_table_bv_key *) k_r;
-    *key_found=0;
+
+    if(key_found)
+        *key_found=0;
 
     uint32_t from_to[2];
     rte_bv_ranges_t ranges;
@@ -209,14 +211,21 @@ static int rte_table_bv_entry_add(void *t_r, void *k_r, void *e_r, int *key_foun
         rte_bv_markers_to_ranges(t->bv_markers+f, 1, sizeof(uint32_t), &ranges);
         cudaMemcpy(t->num_ranges+f, (void *) &ranges.num_ranges, sizeof(uint64_t), cudaMemcpyHostToDevice);
     }
+
     cudaMemcpy(&t->entries[t->entry_size*k->pos], e_r, t->entry_size, cudaMemcpyHostToDevice);
+
+    if(e_ptr)
+        *e_ptr=&t->entries[t->entry_size*k->pos];
+
     return 0;
 }
 
-static int rte_table_bv_entry_delete(void  *t_r, void *k_r, int *key_found, void *e) {
+static int rte_table_bv_entry_delete(void  *t_r, void *k_r, int *key_found, __rte_unused void *e) {
     struct rte_table_bv *t=(struct rte_table_bv *) t_r;
     struct rte_table_bv_key *k=(struct rte_table_bv_key *) k_r;
-    *key_found=0;
+
+    if(key_found)
+        *key_found=0;
 
     uint32_t from_to[2];
     rte_bv_ranges_t ranges;
@@ -237,7 +246,7 @@ static int rte_table_bv_entry_delete(void  *t_r, void *k_r, int *key_found, void
     return 0;
 }
 
-static int rte_table_bv_entry_add_bulk(void *t_r, void **ks_r, void **es_r, uint32_t n_keys, int *key_found, void **e_ptr) {
+static int rte_table_bv_entry_add_bulk(void *t_r, void **ks_r, void **es_r, uint32_t n_keys, int *key_found, __rte_unused void **e_ptr) {
     struct rte_table_bv *t=(struct rte_table_bv *) t_r;
     struct rte_table_bv_key **ks=(struct rte_table_bv_key **) ks_r;
 
@@ -259,13 +268,22 @@ static int rte_table_bv_entry_add_bulk(void *t_r, void **ks_r, void **es_r, uint
         cudaMemcpy(t->num_ranges+f, (void *) &ranges.num_ranges, sizeof(uint64_t), cudaMemcpyHostToDevice);
     }
 
-    for(uint32_t k=0; k<n_keys; ++k)
-        cudaMemcpy(&t->entries[(t->entry_size)*(ks[k]->pos)], es_r[ks[k]->pos], t->entry_size, cudaMemcpyHostToDevice);
+
+    for(uint32_t k=0; k<n_keys; ++k) {
+        if(key_found)
+            key_found[k]=0;
+
+        cudaMemcpy(&t->entries[t->entry_size*ks[k]->pos], es_r[ks[k]->pos], t->entry_size, cudaMemcpyHostToDevice);
+
+        if(e_ptr)
+            e_ptr[k]=&t->entries[t->entry_size*ks[k]->pos];
+
+    }
 
     return 0;
 }
 
-static int rte_table_bv_entry_delete_bulk(void  *t_r, void **ks_r, uint32_t n_keys, int *key_found, void **es_r) {
+static int rte_table_bv_entry_delete_bulk(void  *t_r, void **ks_r, uint32_t n_keys, int *key_found, __rte_unused void **es_r) {
     struct rte_table_bv *t=(struct rte_table_bv *) t_r;
     struct rte_table_bv_key **ks=(struct rte_table_bv_key **) ks_r;
 
@@ -286,6 +304,10 @@ static int rte_table_bv_entry_delete_bulk(void  *t_r, void **ks_r, uint32_t n_ke
         rte_bv_markers_to_ranges(t->bv_markers+f, 1, sizeof(uint32_t), &ranges);
         cudaMemcpy(t->num_ranges+f, (void *) &ranges.num_ranges, sizeof(uint64_t), cudaMemcpyHostToDevice);
     }
+
+    if(key_found)
+        for(uint32_t k=0; k<n_keys; ++k)
+            key_found[k]=0;
 
     return 0;
 }
@@ -368,8 +390,8 @@ __global__ void bv_search(	const uint32_t *__restrict__ const *__restrict__ rang
                 for(int field_id=0; field_id<num_fields; ++field_id)
                     x&=bv[pkt_id][field_id][bv_block];
 
-                __syncwarp();
-                if((tm=__ballot_sync(UINT32_MAX, __ffs(x)))) {
+                __syncwarp(__activemask()); //TODO maybe remove
+                if((tm=__ballot_sync(__activemask(), __ffs(x)))) {
                     if((__ffs(tm)-1)==threadIdx.x) {
                         matched_entries[pkt_id]=(void *) &entries[entry_size*((bv_block<<5)+__ffs(x)-1)];
                         //positions[pkt_id]=(bv_block<<5)+__ffs(x)-1;
