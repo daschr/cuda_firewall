@@ -4,9 +4,12 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdbool.h>
-#include "rte_bv.h"
 
 #define INITIAL_BUFSIZE 16
+
+#include <rte_acl.h>
+#include <rte_table.h>
+#include <rte_table_acl.h>
 
 enum {
 	RULE_DROP = 1,
@@ -16,7 +19,7 @@ enum {
 typedef struct {
     size_t num_rules;
     size_t rules_size;
-    struct rte_table_bv_key **rules;
+    struct rte_table_acl_rule_add_params **rules;
 	uint8_t *actions; 
 } ruleset_t;
 

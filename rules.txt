@@ -1,5 +1,5 @@
 # EXAMPLE RULES
-# dst src dstport srcport proto action
+# src dst srcport dstport proto action
 
 192.168.8.0/24 192.168.2.0/24 0 0 0 DROP
 192.168.8.0/24 192.168.251.0/24 0 0 0 DROP

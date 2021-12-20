@@ -35,7 +35,10 @@ extern "C" {
 
 #include <cuda_runtime.h>
 
-#include "rte_table_bv.h"
+#include <rte_acl.h>
+#include <rte_table.h>
+#include <rte_table_acl.h>
+
 #include "parser.h"
 #include "config.h"
 #include "misc.h"
@@ -56,12 +59,17 @@ void *table;
 ruleset_t ruleset;
 uint16_t tap_port_id, trunk_port_id;
 unsigned long timestamp;
+uint32_t fdefs_offsets[5];
 
 stats_t *old_port_stats=NULL, *port_stats=NULL;
 
 firewall_conf_t fw_conf;
 
 volatile uint8_t running;
+
+int *key_found=NULL;
+uint8_t **actions=NULL;
+uint8_t **entry_handles=NULL;
 
 void exit_handler(int e) {
     running=0;
@@ -70,10 +78,14 @@ void exit_handler(int e) {
 
     free_ruleset(&ruleset);
 
-    rte_table_bv_ops.f_free(table);
+    rte_table_acl_ops.f_free(table);
 
     rte_free(port_stats);
     rte_free(old_port_stats);
+
+    rte_free(key_found);
+    rte_free(actions);
+    rte_free(entry_handles);
 
     rte_eal_cleanup();
 
@@ -106,20 +118,11 @@ static int firewall(void *arg) {
     stats_t *stats=((stats_t *) conf->stats)+((rte_lcore_id()&1)^1);
 
     if(rte_lcore_id()&1) {
-        volatile uint64_t *lookup_hit_mask, *lookup_hit_mask_d, pkts_mask;
-        volatile uint32_t *positions, *positions_d;
+        volatile uint64_t lookup_hit_mask;
+        uint64_t pkts_mask;
+        uint8_t *actions[BURST_SIZE];
 
-        cudaHostAlloc((void **) &positions, sizeof(uint32_t)*BURST_SIZE, cudaHostAllocMapped);
-        cudaHostGetDevicePointer((void **) &positions_d, (uint32_t *) positions, 0);
-
-        cudaHostAlloc((void **) &lookup_hit_mask, sizeof(uint64_t), cudaHostAllocMapped);
-        cudaHostGetDevicePointer((void **) &lookup_hit_mask_d, (uint64_t *) lookup_hit_mask, 0);
-
-        struct rte_mbuf **bufs_rx;
-        struct rte_mbuf **bufs_rx_d;
-        cudaHostAlloc((void **) &bufs_rx, sizeof(struct rte_mbuf*)*BURST_SIZE, cudaHostAllocMapped);
-        cudaHostGetDevicePointer((void **) &bufs_rx_d, bufs_rx, 0);
-
+        struct rte_mbuf *bufs_rx[BURST_SIZE];
         struct rte_mbuf *bufs_tx[BURST_SIZE];
 
         cudaStream_t stream;
@@ -127,8 +130,8 @@ static int firewall(void *arg) {
 
         int16_t i,j;
 
-        *lookup_hit_mask=0;
-        for(; likely(running); *lookup_hit_mask=0) {
+        lookup_hit_mask=0;
+        for(; likely(running); lookup_hit_mask=0) {
             const uint16_t nb_rx = rte_eth_rx_burst(trunk_port_id, queue_id, bufs_rx, BURST_SIZE);
 
             if(unlikely(nb_rx==0))
@@ -136,13 +139,17 @@ static int firewall(void *arg) {
 
             pkts_mask=nb_rx==64?UINT64_MAX:((1LU<<nb_rx)-1);
 
-            rte_table_bv_lookup_stream(conf->table, stream, bufs_rx_d, pkts_mask, (uint64_t *) lookup_hit_mask_d, (void **) positions_d);
+            rte_table_acl_ops.f_lookup(conf->table, bufs_rx, pkts_mask, (uint64_t *) &lookup_hit_mask, (void **) actions);
 
             i=0;
             j=0;
 
+            //printf("lookup_hit_mask: %lX\n", lookup_hit_mask);
             for(; i<nb_rx; ++i) {
-                if(unlikely((*lookup_hit_mask>>i)&1&(conf->actions[positions[i]]==RULE_DROP)))
+                if(unlikely(!((lookup_hit_mask>>i)&1)))
+                    continue;
+
+                if(unlikely(*(actions[i])==RULE_DROP))
                     continue;
 
                 bufs_tx[j++]=bufs_rx[i];
@@ -280,37 +287,56 @@ int main(int ac, char *as[]) {
 
     printf("parsed ruleset \"%s\" with %lu rules\n", as[0], ruleset.num_rules);
 
-    struct rte_table_bv_field_def fdefs[5];
-    uint32_t fdefs_offsets[5]= {	offsetof(struct rte_ipv4_hdr, src_addr),
-                                    offsetof(struct rte_ipv4_hdr, dst_addr),
-                                    sizeof(struct rte_ipv4_hdr)+offsetof(struct rte_tcp_hdr, src_port),
-                                    sizeof(struct rte_ipv4_hdr)+offsetof(struct rte_tcp_hdr, dst_port),
-                                    offsetof(struct rte_ipv4_hdr, next_proto_id)
-                               },
-                               fdefs_sizes[5]= {4,4,2,2,1},
-    ptype_masks[5] = {
-        RTE_PTYPE_L2_MASK|RTE_PTYPE_L3_IPV4|RTE_PTYPE_L4_MASK,
-        RTE_PTYPE_L2_MASK|RTE_PTYPE_L3_IPV4|RTE_PTYPE_L4_MASK,
-        RTE_PTYPE_L2_MASK|RTE_PTYPE_L3_IPV4|RTE_PTYPE_L4_TCP|RTE_PTYPE_L4_UDP,
-        RTE_PTYPE_L2_MASK|RTE_PTYPE_L3_IPV4|RTE_PTYPE_L4_TCP|RTE_PTYPE_L4_UDP,
-        RTE_PTYPE_L2_ETHER|RTE_PTYPE_L3_MASK|RTE_PTYPE_L4_MASK
-    };
+    struct rte_table_acl_params table_params;
+    table_params.name="2tuple";
+    table_params.n_rules=10;
+    table_params.n_rule_fields=5;
 
-    for(size_t i=0; i<5; ++i) {
-        fdefs[i].offset=sizeof(struct rte_ether_hdr) + fdefs_offsets[i];
-        fdefs[i].type=RTE_TABLE_BV_FIELD_TYPE_RANGE;
-        fdefs[i].ptype_mask=ptype_masks[i];
-        fdefs[i].size=fdefs_sizes[i];
+    fdefs_offsets[0]=offsetof(struct rte_ipv4_hdr, next_proto_id);
+    fdefs_offsets[1]=offsetof(struct rte_ipv4_hdr, src_addr);
+    fdefs_offsets[2]=offsetof(struct rte_ipv4_hdr, dst_addr);
+    fdefs_offsets[3]=sizeof(struct rte_ipv4_hdr)+offsetof(struct rte_tcp_hdr, src_port);
+    fdefs_offsets[4]=sizeof(struct rte_ipv4_hdr)+offsetof(struct rte_tcp_hdr, dst_port);
+
+    uint8_t fdefs_sizes[5]= {1,4,4,2,2};
+
+    for(uint8_t i=0; i<5; ++i) {
+        table_params.field_format[i].offset=sizeof(struct rte_ether_hdr) + fdefs_offsets[i];
+        table_params.field_format[i].type=RTE_ACL_FIELD_TYPE_RANGE;
+        table_params.field_format[i].size=fdefs_sizes[i];
+        table_params.field_format[i].field_index=i;
+        table_params.field_format[i].input_index=i==4?3:i;
     }
 
-    struct rte_table_bv_params table_params = { .num_fields=5, .field_defs=fdefs };
+    key_found=rte_malloc("key_found", sizeof(int)*ruleset.num_rules, sizeof(int));
+    actions=rte_malloc("actions", sizeof(uint8_t*)*ruleset.num_rules, sizeof(uint8_t*));
+    entry_handles=rte_malloc("entry_handles", sizeof(uint8_t *)*ruleset.num_rules, sizeof(uint8_t *));
 
-    void *table=rte_table_bv_ops.f_create(&table_params, rte_socket_id(), 0);
+    for(uint32_t i=0; i<ruleset.num_rules; ++i)
+        actions[i]=&ruleset.actions[i];
+
+    table=rte_table_acl_ops.f_create(&table_params, rte_socket_id(), sizeof(uint8_t));
 
     if(table==NULL)
         goto err;
 
-    rte_table_bv_ops.f_add_bulk(table, (void **) ruleset.rules, NULL, ruleset.num_rules, NULL, NULL);
+    rte_table_acl_ops.f_add_bulk(table, (void **) ruleset.rules, (void **) actions, ruleset.num_rules, key_found, (void **) entry_handles);
+
+#define FIELD(I, X, B) (ruleset.rules[I]->field_value[X].value.u##B)
+#define MASK(I, X, B) (ruleset.rules[I]->field_value[X].mask_range.u##B)
+    for(uint32_t i=0; i<ruleset.num_rules; ++i) {
+        printf("key_found: %d entry_handles: %p entry_handles[%u]: %u\n", key_found[i], entry_handles[i], i, *((uint8_t *) entry_handles[i]));
+        printf("%u: %02X-%02X %08X-%08X %08X-%08X %04X-%04X %04X-%04X\n",
+               i,
+               FIELD(i, 0, 8), MASK(i, 0, 8),
+               FIELD(i, 1, 32), MASK(i, 1, 32),
+               FIELD(i, 2, 32), MASK(i, 2, 32),
+               FIELD(i, 3, 16), MASK(i, 3, 16),
+               FIELD(i, 4, 16), MASK(i, 4, 16)
+              );
+    }
+#undef FIELD
+#undef MASK
 
     free_ruleset_except_actions(&ruleset);
 
@@ -334,7 +360,7 @@ int main(int ac, char *as[]) {
 
     rte_eal_mp_wait_lcore();
 
-    rte_table_bv_ops.f_free(table);
+    rte_table_acl_ops.f_free(table);
 
     free(ruleset.actions);
 
