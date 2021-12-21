@@ -314,7 +314,7 @@ static int rte_table_bv_entry_delete_bulk(void  *t_r, void **ks_r, uint32_t n_ke
 
 __global__ void bv_search(	const uint32_t *__restrict__ const *__restrict__ ranges_from, const uint32_t *__restrict__ const *__restrict__ ranges_to,
                             const uint64_t *__restrict__ num_ranges, const uint32_t *__restrict__ offsets,  const uint8_t *__restrict__ sizes,
-                            const uint32_t *__restrict__ ptype_mask,  const uint32_t *__restrict__ const *__restrict__ bvs, const uint32_t bv_bs,
+                            const uint32_t *ptype_mask,  const uint32_t *__restrict__ const *__restrict__ bvs, const uint32_t bv_bs,
                             const uint32_t num_fields, const uint32_t entry_size, const uint8_t *__restrict__ entries,
                             const ulong pkts_mask, const uint8_t *__restrict__ const *__restrict__ pkts, const uint32_t *__restrict__ pkts_type,
                             void *__restrict__ *matched_entries, ulong *__restrict__ lookup_hit_mask) {
@@ -328,98 +328,95 @@ __global__ void bv_search(	const uint32_t *__restrict__ const *__restrict__ rang
     }
 
     const int pkt_id=(blockDim.y*blockIdx.x+threadIdx.y);
-
-#define ptype_a (pkts_type[pkt_id]& *ptype_mask)
+    const uint32_t ptype_a=pkts_type[pkt_id]&*ptype_mask;
     const bool do_search=  	(pkts_mask>>pkt_id)&1
                             & (ptype_a&RTE_PTYPE_L2_MASK)!=0
                             & (ptype_a&RTE_PTYPE_L3_MASK)!=0
                             & (ptype_a&RTE_PTYPE_L4_MASK)!=0;
-#undef ptype_a
 
-    if(do_search) {
-        for(int field_id=0; field_id<num_fields; ++field_id) {
-            uint v;
-            if(!threadIdx.x) {
-                bv[pkt_id][field_id]=NULL;
-                const uint8_t *pkt=(uint8_t * ) pkts[pkt_id]+offsets[field_id];
-                switch(sizes[field_id]) {
-                case 1:
-                    v=*pkt;
-                    break;
-                case 2:
-                    v=pkt[1]|(pkt[0]<<8);
-                    break;
-                case 4:
-                    v=pkt[3]|(pkt[2]<<8)|(pkt[1]<<16)|(pkt[0]<<24);
-                    break;
-                default:
-                    printf("[%d|%d] unknown size: %u byte\n", blockIdx.x, threadIdx.y, sizes[field_id]);
-                    break;
-                }
+    if(!do_search)
+        return;
+
+    for(int field_id=0; field_id<num_fields; ++field_id) {
+        uint v;
+        if(!threadIdx.x) {
+            bv[pkt_id][field_id]=NULL;
+            const uint8_t *pkt=(uint8_t * ) pkts[pkt_id]+offsets[field_id];
+            switch(sizes[field_id]) {
+            case 1:
+                v=*pkt;
+                break;
+            case 2:
+                v=pkt[1]|(pkt[0]<<8);
+                break;
+            case 4:
+                v=pkt[3]|(pkt[2]<<8)|(pkt[1]<<16)|(pkt[0]<<24);
+                break;
+            default:
+                printf("[%d|%d] unknown size: %u byte\n", blockIdx.x, threadIdx.y, sizes[field_id]);
+                break;
             }
-            v=__shfl_sync(UINT32_MAX, v, 0);
+        }
+        v=__shfl_sync(UINT32_MAX, v, 0);
 
 
-            long size=__ldg(&num_ranges[field_id])>>5;
-            long start=0, offset;
-            uint32_t l,r,tm;
-            __syncwarp();
+        long size=__ldg(&num_ranges[field_id])>>5;
+        long start=0, offset;
+        uint32_t l,r,tm;
+        __syncwarp();
 
-            while(size) {
-                offset=start+threadIdx.x*size;
-                l=__ballot_sync(UINT32_MAX, v>=ranges_from[field_id][offset]);
-                r=__ballot_sync(UINT32_MAX, v<=ranges_to[field_id][offset]);
-                if(l&r) {
-                    if((__ffs(l&r)-1)==threadIdx.x)
-                        bv[pkt_id][field_id]=bvs[field_id]+offset*RTE_TABLE_BV_BS;
-                    goto found_bv;
-                }
-                if(!l)
-                    goto found_bv;
-
-                tm=__popc(l)-1;
-                start=__shfl_sync(UINT32_MAX, offset+1, tm);
-                size=tm==31?(__ldg(&num_ranges[field_id])-start)>>5:(size-1)>>5;
-
-                __syncwarp();
-            }
-            offset=start+threadIdx.x;
-            l=__ballot_sync(UINT32_MAX, offset<__ldg(&num_ranges[field_id])?v>=ranges_from[field_id][offset]:0);
-            r=__ballot_sync(UINT32_MAX, offset<__ldg(&num_ranges[field_id])?v<=ranges_to[field_id][offset]:0);
+        while(size) {
+            offset=start+threadIdx.x*size;
+            l=__ballot_sync(UINT32_MAX, v>=ranges_from[field_id][offset]);
+            r=__ballot_sync(UINT32_MAX, v<=ranges_to[field_id][offset]);
             if(l&r) {
-                if((__ffs(l&r)-1)==threadIdx.x) {
+                if((__ffs(l&r)-1)==threadIdx.x)
                     bv[pkt_id][field_id]=bvs[field_id]+offset*RTE_TABLE_BV_BS;
-                }
+                goto found_bv;
             }
+            if(!l)
+                goto found_bv;
+
+            tm=__popc(l)-1;
+            start=__shfl_sync(UINT32_MAX, offset+1, tm);
+            size=tm==31?(__ldg(&num_ranges[field_id])-start)>>5:(size-1)>>5;
+
+            __syncwarp();
+        }
+        offset=start+threadIdx.x;
+        l=__ballot_sync(UINT32_MAX, offset<__ldg(&num_ranges[field_id])?v>=ranges_from[field_id][offset]:0);
+        r=__ballot_sync(UINT32_MAX, offset<__ldg(&num_ranges[field_id])?v<=ranges_to[field_id][offset]:0);
+        if(l&r) {
+            if((__ffs(l&r)-1)==threadIdx.x) {
+                bv[pkt_id][field_id]=bvs[field_id]+offset*RTE_TABLE_BV_BS;
+            }
+        }
 
 found_bv:
-            if(!bv[pkt_id][field_id])
-                goto end;
-        }
-        {
-            __syncwarp();
-            // all bitvectors found, now getting highest-priority rule
-            uint x, tm;
-            for(int bv_block=threadIdx.x; bv_block<bv_bs; bv_block+=blockDim.x) { // TODO maybe use WORKERS_PER_PACKET
-                x=UINT32_MAX;
-                for(int field_id=0; field_id<num_fields; ++field_id)
-                    x&=bv[pkt_id][field_id][bv_block];
+        if(!bv[pkt_id][field_id])
+            goto end;
+    }
+    {
+        __syncwarp();
+        // all bitvectors found, now getting highest-priority rule
+        uint x, tm;
+        for(int bv_block=threadIdx.x; bv_block<bv_bs; bv_block+=blockDim.x) { // TODO maybe use WORKERS_PER_PACKET
+            x=UINT32_MAX;
+            for(int field_id=0; field_id<num_fields; ++field_id)
+                x&=bv[pkt_id][field_id][bv_block];
 
-                __syncwarp(__activemask()); //TODO maybe remove
-                if((tm=__ballot_sync(__activemask(), __ffs(x)))) {
-                    if((__ffs(tm)-1)==threadIdx.x) {
-                        matched_entries[pkt_id]=(void *) &entries[entry_size*((bv_block<<5)+__ffs(x)-1)];
-                        //positions[pkt_id]=(bv_block<<5)+__ffs(x)-1;
-                        atomicOr((unsigned long long int *)&c_lookup_hit_mask, 1LU<<pkt_id);
-                    }
-                    break;
+            __syncwarp(__activemask()); //TODO maybe remove
+            if((tm=__ballot_sync(__activemask(), __ffs(x)))) {
+                if((__ffs(tm)-1)==threadIdx.x) {
+                    matched_entries[pkt_id]=(void *) &entries[entry_size*((bv_block<<5)+__ffs(x)-1)];
+                    //positions[pkt_id]=(bv_block<<5)+__ffs(x)-1;
+                    atomicOr((unsigned long long int *)&c_lookup_hit_mask, 1LU<<pkt_id);
                 }
+                break;
             }
         }
-end:
-        __syncwarp();
     }
-
+end:
 
     __syncthreads();
 
