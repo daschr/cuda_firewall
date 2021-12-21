@@ -10,9 +10,9 @@ extern "C" {
 #include <rte_malloc.h>
 #include <stdlib.h>
 
-#define NUM_BLOCKS 4
+#define NUM_BLOCKS 2
 #define WORKERS_PER_PACKET 32
-#define PACKETS_PER_BLOCK 16
+#define PACKETS_PER_BLOCK 32
 
 #ifdef RTE_TABLE_STATS_COLLECT
 #define RTE_TABLE_BV_STATS_PKTS_IN_ADD(table, val) table->stats.n_pkts_in += val
