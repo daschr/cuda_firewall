@@ -10,9 +10,9 @@ extern "C" {
 #include <rte_malloc.h>
 #include <stdlib.h>
 
-#define NUM_BLOCKS 2
+#define NUM_BLOCKS 4
 #define WORKERS_PER_PACKET 32
-#define PACKETS_PER_BLOCK 32
+#define PACKETS_PER_BLOCK 16
 
 #ifdef RTE_TABLE_STATS_COLLECT
 #define RTE_TABLE_BV_STATS_PKTS_IN_ADD(table, val) table->stats.n_pkts_in += val
@@ -315,25 +315,22 @@ static int rte_table_bv_entry_delete_bulk(void  *t_r, void **ks_r, uint32_t n_ke
 __global__ void bv_search(	const uint32_t *__restrict__ const *__restrict__ ranges_from, const uint32_t *__restrict__ const *__restrict__ ranges_to,
                             const uint64_t *__restrict__ num_ranges, const uint32_t *__restrict__ offsets,  const uint8_t *__restrict__ sizes,
                             const uint32_t *__restrict__ ptype_mask,  const uint32_t *__restrict__ const *__restrict__ bvs, const uint32_t bv_bs,
-                            const uint32_t num_fields, const uint32_t entry_size, uint8_t *__restrict__ entries,
+                            const uint32_t num_fields, const uint32_t entry_size, const uint8_t *__restrict__ entries,
                             const ulong pkts_mask, const uint8_t *__restrict__ const *__restrict__ pkts, const uint32_t *__restrict__ pkts_type,
                             void *__restrict__ *matched_entries, ulong *__restrict__ lookup_hit_mask) {
 
     __shared__ const uint *bv[RTE_TABLE_BV_MAX_PKTS][RTE_TABLE_BV_MAX_FIELDS];
-    __shared__ uint64_t c_pkts_mask;
     __shared__ uint64_t c_lookup_hit_mask;
 
     if(!(threadIdx.x|threadIdx.y|threadIdx.z)) {
-        c_pkts_mask=pkts_mask;
         c_lookup_hit_mask=0;
+        __threadfence_block();
     }
 
     const int pkt_id=(blockDim.y*blockIdx.x+threadIdx.y);
 
-    __syncthreads();
-
 #define ptype_a (pkts_type[pkt_id]& *ptype_mask)
-    const bool do_search=  	(c_pkts_mask>>pkt_id)&1
+    const bool do_search=  	(pkts_mask>>pkt_id)&1
                             & (ptype_a&RTE_PTYPE_L2_MASK)!=0
                             & (ptype_a&RTE_PTYPE_L3_MASK)!=0
                             & (ptype_a&RTE_PTYPE_L4_MASK)!=0;
@@ -362,27 +359,45 @@ __global__ void bv_search(	const uint32_t *__restrict__ const *__restrict__ rang
             }
             v=__shfl_sync(UINT32_MAX, v, 0);
 
-            long se[]= {0, (long) num_ranges[field_id]>>5};
-            uint32_t l,r;
+
+            long size=__ldg(&num_ranges[field_id])>>5;
+            long start=0, offset;
+            uint32_t l,r,tm;
             __syncwarp();
 
-            for(long i=se[1]>>1; se[0]<=se[1]; i=(se[0]+se[1])>>1) {
-                const long j=((i<<5)|threadIdx.x);
-                l=__ballot_sync(UINT32_MAX, j<num_ranges[field_id]?v>=ranges_from[field_id][j]:0);
-                r=__ballot_sync(UINT32_MAX, j<num_ranges[field_id]?v<=ranges_to[field_id][j]:0);
+            while(size) {
+                offset=start+threadIdx.x*size;
+                l=__ballot_sync(UINT32_MAX, v>=ranges_from[field_id][offset]);
+                r=__ballot_sync(UINT32_MAX, v<=ranges_to[field_id][offset]);
                 if(l&r) {
-                    if((__ffs(l&r)-1)==threadIdx.x) {
-                        bv[pkt_id][field_id]=bvs[field_id]+j*RTE_TABLE_BV_BS;
-                    }
-                    break;
+                    if((__ffs(l&r)-1)==threadIdx.x)
+                        bv[pkt_id][field_id]=bvs[field_id]+offset*RTE_TABLE_BV_BS;
+                    goto found_bv;
                 }
-                se[!l]=!l?i-1:i+1;
+                if(!l)
+                    goto found_bv;
+
+                tm=__popc(l)-1;
+                start=__shfl_sync(UINT32_MAX, offset+1, tm);
+                size=tm==31?(__ldg(&num_ranges[field_id])-start)>>5:(size-1)>>5;
+
                 __syncwarp();
             }
+            offset=start+threadIdx.x;
+            l=__ballot_sync(UINT32_MAX, offset<__ldg(&num_ranges[field_id])?v>=ranges_from[field_id][offset]:0);
+            r=__ballot_sync(UINT32_MAX, offset<__ldg(&num_ranges[field_id])?v<=ranges_to[field_id][offset]:0);
+            if(l&r) {
+                if((__ffs(l&r)-1)==threadIdx.x) {
+                    bv[pkt_id][field_id]=bvs[field_id]+offset*RTE_TABLE_BV_BS;
+                }
+            }
+
+found_bv:
             if(!bv[pkt_id][field_id])
                 goto end;
         }
         {
+            __syncwarp();
             // all bitvectors found, now getting highest-priority rule
             uint x, tm;
             for(int bv_block=threadIdx.x; bv_block<bv_bs; bv_block+=blockDim.x) { // TODO maybe use WORKERS_PER_PACKET
@@ -412,8 +427,6 @@ end:
         atomicOr((unsigned long long int *) lookup_hit_mask, c_lookup_hit_mask);
         __threadfence_system();
     }
-
-    __syncthreads();
 }
 
 int rte_table_bv_lookup_stream(void *t_r, cudaStream_t stream, struct rte_mbuf **pkts, uint64_t pkts_mask,
