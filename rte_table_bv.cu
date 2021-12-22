@@ -347,7 +347,7 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from, uin
 
         long size=num_ranges[field_id]>>5;
         long start=0, offset;
-        uint32_t l,r,tm;
+        uint32_t l,r; //left, right
         __syncwarp();
 
         while(size) {
@@ -362,9 +362,10 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from, uin
             if(!l)
                 goto found_bv;
 
-            tm=__popc(l)-1;
-            start=__shfl_sync(UINT32_MAX, offset+1, tm);
-            size=tm==31?(num_ranges[field_id]-start)>>5:(size-1)>>5;
+            //reuse r to save one register per thread
+            r=__popc(l)-1;
+            start=__shfl_sync(UINT32_MAX, offset+1, r);
+            size=r==31?(num_ranges[field_id]-start)>>5:(size-1)>>5;
 
             __syncwarp();
         }
