@@ -93,13 +93,6 @@ static int rte_table_bv_free(void *t_r) {
     return 0;
 }
 
-__global__ void bv_search(	const uint32_t *__restrict__ const *__restrict__ ranges_from, const uint32_t *__restrict__ const *__restrict__ ranges_to,
-                            const uint64_t *__restrict__ num_ranges, const uint32_t *__restrict__ offsets,  const uint8_t *__restrict__ sizes,
-                            const uint32_t *__restrict__ const *__restrict__ bvs, const uint32_t bv_bs,
-                            const uint32_t num_fields, const uint32_t entry_size, const uint8_t *__restrict__ entries,
-                            const ulong pkts_mask, const uint8_t *__restrict__ const *__restrict__ pkts,
-                            void *__restrict__ *matched_entries, ulong *__restrict__ lookup_hit_mask);
-
 #define IS_ERROR(X) is_error(X, __FILE__, __LINE__)
 
 static void *rte_table_bv_create(void *params, int socket_id, uint32_t entry_size) {
@@ -146,7 +139,6 @@ static void *rte_table_bv_create(void *params, int socket_id, uint32_t entry_siz
     CHECK(cudaMemcpy(t->ranges_to_dev, t->ranges_to, sizeof(uint32_t *)*t->num_fields, cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(t->bvs_dev, t->bvs, sizeof(uint32_t *)*t->num_fields, cudaMemcpyHostToDevice));
     CHECK(cudaDeviceSetCacheConfig(cudaFuncCachePreferL1));
-    CHECK(cudaFuncSetAttribute(bv_search, cudaFuncAttributePreferredSharedMemoryCarveout, cudaSharedmemCarveoutMaxL1));
 #undef CHECK
 
     t->bv_markers=(rte_bv_markers_t *) rte_malloc("bv_markers", sizeof(rte_bv_markers_t)*t->num_fields, 0);
@@ -311,14 +303,14 @@ static int rte_table_bv_entry_delete_bulk(void  *t_r, void **ks_r, uint32_t n_ke
     return 0;
 }
 
-__global__ void bv_search(	const uint32_t *__restrict__ const *__restrict__ ranges_from, const uint32_t *__restrict__ const *__restrict__ ranges_to,
-                            const uint64_t *__restrict__ num_ranges, const uint32_t *__restrict__ offsets,  const uint8_t *__restrict__ sizes,
-                            const uint32_t *__restrict__ const *__restrict__ bvs, const uint32_t bv_bs,
+__global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from, uint32_t *__restrict__ *__restrict__ ranges_to,
+                            const uint64_t *__restrict__ num_ranges, const uint32_t *__restrict__ offsets,  uint8_t *__restrict__ sizes,
+                            uint32_t *__restrict__ *__restrict__ bvs, const uint32_t bv_bs,
                             const uint32_t num_fields, const uint32_t entry_size, const uint8_t *__restrict__ entries,
-                            const ulong pkts_mask, const uint8_t *__restrict__ const *__restrict__ pkts,
+                            const ulong pkts_mask, uint8_t *__restrict__ *__restrict__ pkts,
                             void *__restrict__ *matched_entries, ulong *__restrict__ lookup_hit_mask) {
 
-    __shared__ const uint *bv[RTE_TABLE_BV_MAX_PKTS][RTE_TABLE_BV_MAX_FIELDS];
+    __shared__ uint *bv[RTE_TABLE_BV_MAX_PKTS][RTE_TABLE_BV_MAX_FIELDS];
     __shared__ uint64_t c_lookup_hit_mask;
 
     if(!(threadIdx.x|threadIdx.y|threadIdx.z)) {
@@ -353,7 +345,7 @@ __global__ void bv_search(	const uint32_t *__restrict__ const *__restrict__ rang
         v=__shfl_sync(UINT32_MAX, v, 0);
 
 
-        long size=__ldg(&num_ranges[field_id])>>5;
+        long size=num_ranges[field_id]>>5;
         long start=0, offset;
         uint32_t l,r,tm;
         __syncwarp();
@@ -372,13 +364,13 @@ __global__ void bv_search(	const uint32_t *__restrict__ const *__restrict__ rang
 
             tm=__popc(l)-1;
             start=__shfl_sync(UINT32_MAX, offset+1, tm);
-            size=tm==31?(__ldg(&num_ranges[field_id])-start)>>5:(size-1)>>5;
+            size=tm==31?(num_ranges[field_id]-start)>>5:(size-1)>>5;
 
             __syncwarp();
         }
         offset=start+threadIdx.x;
-        l=__ballot_sync(UINT32_MAX, offset<__ldg(&num_ranges[field_id])?v>=ranges_from[field_id][offset]:0);
-        r=__ballot_sync(UINT32_MAX, offset<__ldg(&num_ranges[field_id])?v<=ranges_to[field_id][offset]:0);
+        l=__ballot_sync(UINT32_MAX, offset<num_ranges[field_id]?v>=ranges_from[field_id][offset]:0);
+        r=__ballot_sync(UINT32_MAX, offset<num_ranges[field_id]?v<=ranges_to[field_id][offset]:0);
         if(l&r) {
             if((__ffs(l&r)-1)==threadIdx.x) {
                 bv[pkt_id][field_id]=bvs[field_id]+offset*RTE_TABLE_BV_BS;
