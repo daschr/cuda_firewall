@@ -289,7 +289,7 @@ int main(int ac, char *as[]) {
 
     struct rte_table_acl_params table_params;
     table_params.name="2tuple";
-    table_params.n_rules=10;
+    table_params.n_rules=40050;
     table_params.n_rule_fields=5;
 
     fdefs_offsets[0]=offsetof(struct rte_ipv4_hdr, next_proto_id);
