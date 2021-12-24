@@ -351,7 +351,7 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from, uin
         __syncwarp();
 
         while(size) {
-            offset=start+threadIdx.x*size;
+            offset=start+((long) threadIdx.x)*size;
             l=__ballot_sync(UINT32_MAX, v>=ranges_from[field_id][offset]);
             r=__ballot_sync(UINT32_MAX, v<=ranges_to[field_id][offset]);
             if(l&r) {
@@ -373,9 +373,8 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from, uin
         l=__ballot_sync(UINT32_MAX, offset<num_ranges[field_id]?v>=ranges_from[field_id][offset]:0);
         r=__ballot_sync(UINT32_MAX, offset<num_ranges[field_id]?v<=ranges_to[field_id][offset]:0);
         if(l&r) {
-            if((__ffs(l&r)-1)==threadIdx.x) {
+            if((__ffs(l&r)-1)==threadIdx.x)
                 bv[pkt_id][field_id]=bvs[field_id]+offset*RTE_TABLE_BV_BS;
-            }
         }
 
 found_bv:
@@ -435,6 +434,7 @@ int rte_table_bv_lookup_stream(void *t_r, cudaStream_t stream, struct rte_mbuf *
             t->bvs_dev, RTE_TABLE_BV_BS, t->num_fields, t->entry_size, t->entries,
             real_pkts_mask, t->pkts_data,
             e, lookup_hit_mask);
+
     cudaStreamSynchronize(stream);
 
     RTE_TABLE_BV_STATS_PKTS_LOOKUP_MISS(t, n_pkts_in-__builtin_popcountll(*lookup_hit_mask));
@@ -462,6 +462,7 @@ static int rte_table_bv_lookup(void *t_r, struct rte_mbuf **pkts, uint64_t pkts_
             t->bvs_dev, RTE_TABLE_BV_BS, t->num_fields, t->entry_size, t->entries,
             real_pkts_mask, t->pkts_data,
             e, lookup_hit_mask);
+
     cudaStreamSynchronize(0);
 
     RTE_TABLE_BV_STATS_PKTS_LOOKUP_MISS(t, n_pkts_in-__builtin_popcountll(*lookup_hit_mask));

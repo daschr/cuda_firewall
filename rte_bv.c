@@ -10,6 +10,15 @@ extern "C" {
 #include <stdio.h>
 #include <stdlib.h>
 
+static inline int is_error(cudaError_t e, const char *file, int line) {
+    if(e!=cudaSuccess) {
+        rte_log(RTE_LOG_ERR, RTE_LOGTYPE_TABLE, "[rte_bv] error: %s in %s (line %d)\n", cudaGetErrorString(e), file, line);
+        return 1;
+    }
+    return 0;
+}
+#define CHECK(X) is_error(X, __FILE__, __LINE__)
+
 int rte_bv_markers_create(rte_bv_markers_t *markers) {
     static size_t c=0;
     static char b[12];
@@ -29,25 +38,34 @@ int rte_bv_markers_create(rte_bv_markers_t *markers) {
         fprintf(stderr, "[rte_bv_markers_create|%d] error creating hash table: %s\n", __LINE__, rte_strerror(rte_errno));
         return 1;
     }
-	
+
     markers->max_value=0;
     markers->num_lists=0;
     ++c;
     return 0;
 }
 
+#define BLAME(X) fprintf(stderr, "[rte_bv_markers_range_add|%d] " X, __LINE__)
 int rte_bv_markers_range_add(rte_bv_markers_t *markers, const uint32_t *from_to, const uint32_t val) {
     rte_bv_marker_list_t *l;
     for(int i=0; i<2;) {
         l=NULL;
         if(rte_hash_lookup_data(markers->table, &from_to[i], (void **) &l)>=0) {
             if(l->num_markers[i] >= l->size[i]) {
+                rte_bv_marker_t *t=realloc(l->list[i], sizeof(rte_bv_marker_t)*(l->size[i]<<1));
+                if(t==NULL) {
+                    BLAME("Error increasing size of marker list\n");
+                    return 0;
+                }
                 l->size[i]<<=1;
-                l->list[i]=(rte_bv_marker_t *) realloc(l->list[i], sizeof(rte_bv_marker_t)*l->size[i]);
+                l->list[i]=t;
             }
         } else {
-            ++markers->num_lists;
             l=(rte_bv_marker_list_t *) malloc(sizeof(rte_bv_marker_list_t));
+            if(!l) {
+                BLAME("Error creating new marker list\n");
+                return 0;
+            }
             l->num_markers[0]=0;
             l->num_markers[1]=0;
             l->num_valid_markers[0]=0;
@@ -57,9 +75,15 @@ int rte_bv_markers_range_add(rte_bv_markers_t *markers, const uint32_t *from_to,
             l->size[1]=RTE_BV_MARKERS_LIST_STND_SIZE;
             l->list[0]=(rte_bv_marker_t *) malloc(sizeof(rte_bv_marker_t)*l->size[0]);
             l->list[1]=(rte_bv_marker_t *) malloc(sizeof(rte_bv_marker_t)*l->size[1]);
-            if(rte_hash_add_key_data(markers->table, &from_to[i], l)) {
-                fprintf(stderr, "Error while adding entry to hash table\n");
+            if(!l->list[0]||!l->list[1]) {
+                BLAME("Error while allocating new marker list\n");
+                return 0;
             }
+            if(rte_hash_add_key_data(markers->table, &from_to[i], l)) {
+                BLAME("Error while adding entry to hash table\n");
+                return 0;
+            }
+            ++markers->num_lists;
         }
 
         if(!l->list[i]) {
@@ -144,10 +168,9 @@ void rte_bv_add_range_host(rte_bv_ranges_t *ranges, uint32_t from, uint32_t to, 
 }
 
 void rte_bv_add_range_gpu(rte_bv_ranges_t *ranges, uint32_t from, uint32_t to, size_t bv_size, const uint32_t *bv) {
-    //printf("%lu %08X %08X\n", ranges->num_ranges, from, to);
-    cudaMemcpy(ranges->ranges_from+ranges->num_ranges, &from, sizeof(uint32_t), cudaMemcpyHostToDevice);
-    cudaMemcpy(ranges->ranges_to+ranges->num_ranges, &to, sizeof(uint32_t), cudaMemcpyHostToDevice);
-    cudaMemcpy(ranges->bvs+(ranges->num_ranges*ranges->bv_bs), bv, sizeof(uint32_t)*bv_size, cudaMemcpyHostToDevice);
+    CHECK(cudaMemcpy(ranges->ranges_from+ranges->num_ranges, &from, sizeof(uint32_t), cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(ranges->ranges_to+ranges->num_ranges, &to, sizeof(uint32_t), cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(ranges->bvs+(ranges->num_ranges*((size_t) ranges->bv_bs)), bv, sizeof(uint32_t)*bv_size, cudaMemcpyHostToDevice));
     ++ranges->num_ranges;
 }
 
