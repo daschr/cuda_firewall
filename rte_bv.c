@@ -160,18 +160,24 @@ inline void bv_unset_list(uint32_t *bv, size_t num_markers, const rte_bv_marker_
     }
 }
 
-void rte_bv_add_range_host(rte_bv_ranges_t *ranges, uint32_t from, uint32_t to, size_t bv_size, const uint32_t *bv) {
+uint8_t rte_bv_add_range_host(rte_bv_ranges_t *ranges, uint32_t from, uint32_t to, size_t bv_size, const uint32_t *bv) {
+    if(ranges->num_ranges>=ranges->max_num_ranges)
+        return 1;
     ranges->ranges_from[ranges->num_ranges]=from;
     ranges->ranges_to[ranges->num_ranges]=to;
     memcpy(ranges->bvs+(ranges->num_ranges*ranges->bv_bs), bv, sizeof(uint32_t)*bv_size);
     ++ranges->num_ranges;
+    return 0;
 }
 
-void rte_bv_add_range_gpu(rte_bv_ranges_t *ranges, uint32_t from, uint32_t to, size_t bv_size, const uint32_t *bv) {
+uint8_t rte_bv_add_range_gpu(rte_bv_ranges_t *ranges, uint32_t from, uint32_t to, size_t bv_size, const uint32_t *bv) {
+    if(ranges->num_ranges>=ranges->max_num_ranges)
+        return 1;
     CHECK(cudaMemcpy(ranges->ranges_from+ranges->num_ranges, &from, sizeof(uint32_t), cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(ranges->ranges_to+ranges->num_ranges, &to, sizeof(uint32_t), cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(ranges->bvs+(ranges->num_ranges*((size_t) ranges->bv_bs)), bv, sizeof(uint32_t)*bv_size, cudaMemcpyHostToDevice));
     ++ranges->num_ranges;
+    return 0;
 }
 
 typedef struct {
@@ -186,7 +192,7 @@ static int sort_vp_list(const void *a_r, const void *b_r) {
 }
 
 int rte_bv_markers_to_ranges(rte_bv_markers_t *markers, const uint8_t gpu, const uint8_t cast_type, rte_bv_ranges_t *ranges) {
-    void (*add_range)(rte_bv_ranges_t *, uint32_t, uint32_t, size_t, const uint32_t *)=gpu?&rte_bv_add_range_gpu:&rte_bv_add_range_host;
+    uint8_t (*add_range)(rte_bv_ranges_t *, uint32_t, uint32_t, size_t, const uint32_t *)=gpu?&rte_bv_add_range_gpu:&rte_bv_add_range_host;
 
     const size_t bv_size=(markers->max_value>>5)+1;
     uint32_t *bv=(uint32_t *) malloc(sizeof(uint32_t)*bv_size);
@@ -207,7 +213,10 @@ int rte_bv_markers_to_ranges(rte_bv_markers_t *markers, const uint8_t gpu, const
             bv_set_list(bv, marker_lists[i].l->num_markers[0], marker_lists[i].l->list[0]);
 
             if(marker_lists[i].l->num_valid_markers[1]) {
-                add_range(ranges, prev, cur, bv_size, bv);
+                if(add_range(ranges, prev, cur, bv_size, bv)) {
+                    fprintf(stderr, "[rte_bv] error while adding range, reached limit\n");
+                    return 1;
+                }
 
                 bv_unset_list(bv, marker_lists[i].l->num_markers[1], marker_lists[i].l->list[1]);
             }
@@ -216,13 +225,21 @@ int rte_bv_markers_to_ranges(rte_bv_markers_t *markers, const uint8_t gpu, const
         }
 
         if(marker_lists[i].l->num_valid_markers[0]) {
-            add_range(ranges, prev, cur-1, bv_size, bv);
+            if(add_range(ranges, prev, cur-1, bv_size, bv)) {
+                fprintf(stderr, "[rte_bv] error while adding range, reached entry limit\n");
+                return 1;
+            }
+
             prev=cur;
             bv_set_list(bv, marker_lists[i].l->num_markers[0], marker_lists[i].l->list[0]);
         }
 
         if(marker_lists[i].l->num_valid_markers[1]) {
-            add_range(ranges, prev, cur, bv_size, bv);
+            if(add_range(ranges, prev, cur, bv_size, bv)) {
+                fprintf(stderr, "[rte_bv] error while adding range, reached entry limit\n");
+                return 1;
+            }
+
             ++cur;
             bv_unset_list(bv, marker_lists[i].l->num_markers[1], marker_lists[i].l->list[1]);
         }

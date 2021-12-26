@@ -322,7 +322,8 @@ int main(int ac, char *as[]) {
     for(uint32_t i=0; i<ruleset.num_rules; ++i)
         actions[i]=&ruleset.actions[i];
 
-    rte_table_bv_ops.f_add_bulk(table, (void **) ruleset.rules, (void **) actions, ruleset.num_rules, NULL, NULL);
+    if(rte_table_bv_ops.f_add_bulk(table, (void **) ruleset.rules, (void **) actions, ruleset.num_rules, NULL, NULL))
+        goto err;
 
     rte_free(actions);
 

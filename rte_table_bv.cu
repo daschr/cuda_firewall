@@ -196,10 +196,12 @@ static int rte_table_bv_entry_add(void *t_r, void *k_r, void *e_r, int *key_foun
 
         memset(&ranges, 0, sizeof(rte_bv_ranges_t));
         ranges.bv_bs=RTE_TABLE_BV_BS;
+        ranges.max_num_ranges=RTE_TABLE_BV_MAX_RANGES;
         ranges.ranges_from=t->ranges_from[f];
         ranges.ranges_to=t->ranges_to[f];
         ranges.bvs=t->bvs[t->num_fields+f];
-        rte_bv_markers_to_ranges(t->bv_markers+f, 1, sizeof(uint32_t), &ranges);
+        if(rte_bv_markers_to_ranges(t->bv_markers+f, 1, sizeof(uint32_t), &ranges))
+            return 1;
         cudaMemcpy(t->num_ranges+f, (void *) &ranges.num_ranges, sizeof(uint64_t), cudaMemcpyHostToDevice);
     }
 
@@ -227,10 +229,12 @@ static int rte_table_bv_entry_delete(void  *t_r, void *k_r, int *key_found, __rt
 
         memset(&ranges, 0, sizeof(rte_bv_ranges_t));
         ranges.bv_bs=RTE_TABLE_BV_BS;
+        ranges.max_num_ranges=RTE_TABLE_BV_MAX_RANGES;
         ranges.ranges_from=t->ranges_from[f];
         ranges.ranges_to=t->ranges_to[f];
         ranges.bvs=t->bvs[f];
-        rte_bv_markers_to_ranges(t->bv_markers+f, 1, sizeof(uint32_t), &ranges);
+        if(rte_bv_markers_to_ranges(t->bv_markers+f, 1, sizeof(uint32_t), &ranges))
+            return 1;
         cudaMemcpy(t->num_ranges+f, (void *) &ranges.num_ranges, sizeof(uint64_t), cudaMemcpyHostToDevice);
     }
 
@@ -252,10 +256,12 @@ static int rte_table_bv_entry_add_bulk(void *t_r, void **ks_r, void **es_r, uint
 
         memset(&ranges, 0, sizeof(rte_bv_ranges_t));
         ranges.bv_bs=RTE_TABLE_BV_BS;
+        ranges.max_num_ranges=RTE_TABLE_BV_MAX_RANGES;
         ranges.ranges_from=t->ranges_from[f];
         ranges.ranges_to=t->ranges_to[f];
         ranges.bvs=t->bvs[f];
-        rte_bv_markers_to_ranges(t->bv_markers+f, 1, sizeof(uint32_t), &ranges);
+        if(rte_bv_markers_to_ranges(t->bv_markers+f, 1, sizeof(uint32_t), &ranges))
+            return 1;
         cudaMemcpy(t->num_ranges+f, (void *) &ranges.num_ranges, sizeof(uint64_t), cudaMemcpyHostToDevice);
     }
 
@@ -289,10 +295,12 @@ static int rte_table_bv_entry_delete_bulk(void  *t_r, void **ks_r, uint32_t n_ke
 
         memset(&ranges, 0, sizeof(rte_bv_ranges_t));
         ranges.bv_bs=RTE_TABLE_BV_BS;
+        ranges.max_num_ranges=RTE_TABLE_BV_MAX_RANGES;
         ranges.ranges_from=t->ranges_from[f];
         ranges.ranges_to=t->ranges_to[f];
         ranges.bvs=t->bvs[f];
-        rte_bv_markers_to_ranges(t->bv_markers+f, 1, sizeof(uint32_t), &ranges);
+        if(rte_bv_markers_to_ranges(t->bv_markers+f, 1, sizeof(uint32_t), &ranges))
+            return 1;
         cudaMemcpy(t->num_ranges+f, (void *) &ranges.num_ranges, sizeof(uint64_t), cudaMemcpyHostToDevice);
     }
 

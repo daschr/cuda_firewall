@@ -32,6 +32,7 @@ typedef struct {
 // must be already allocated
 typedef struct {
     size_t num_ranges; // initial: 0
+    size_t max_num_ranges;
     size_t bv_bs; // initial: >= number of ranges>>5
     uint32_t *ranges_from; // intial size: >= 2*(number of ranges)
     uint32_t *ranges_to; // intial size: >= 2*(number of ranges)
