@@ -25,15 +25,15 @@ bool parse_ruleset(ruleset_t *ruleset, const char *file) {
     char v_buf[3][13], command[13];
 
     if(ruleset->rules==NULL) {
-        if((ruleset->rules=malloc(sizeof(struct rte_bv_classifier_key *)*INITIAL_BUFSIZE))==NULL) {
+        if((ruleset->rules=malloc(sizeof(struct rte_table_bv_key *)*INITIAL_BUFSIZE))==NULL) {
             fprintf(stderr, "ERROR: could not allocate memory for rules!\n");
             goto failure;
         }
 
-        if((ruleset->actions=malloc(sizeof(uint8_t)*INITIAL_BUFSIZE))==NULL) {
-            fprintf(stderr, "ERROR: could not allocate memory for actions!\n");
-            goto failure;
-        }
+		if((ruleset->actions=malloc(sizeof(uint8_t)*INITIAL_BUFSIZE))==NULL){
+				fprintf(stderr, "ERROR: could not allocate memory for actions!\n");
+				goto failure;
+		}
 
         for(size_t i=0; i<INITIAL_BUFSIZE; ++i) {
             if((ruleset->rules[i]=malloc(sizeof(struct rte_bv_classifier_key)))==NULL) {
@@ -53,7 +53,7 @@ bool parse_ruleset(ruleset_t *ruleset, const char *file) {
     ruleset->num_rules=0;
 
     while(fgets(inp_line, PARSER_LINESIZE, fd)!=NULL) {
-        if(*inp_line=='#') continue;
+		if(*inp_line=='#') continue;
 
         if(sscanf(inp_line, "%hhu.%hhu.%hhu.%hhu/%hhu %hhu.%hhu.%hhu.%hhu/%hhu %12s %12s %12s %6s",
                   &ip_buf[0], &ip_buf[1], &ip_buf[2], &ip_buf[3], &ip_buf[4],
@@ -76,7 +76,7 @@ bool parse_ruleset(ruleset_t *ruleset, const char *file) {
                     goto failure;
                 }
             }
-
+			
             if(strcmp(command, "DROP")==0) {
                 ruleset->actions[ruleset->num_rules]=RULE_DROP;
             } else if(strcmp(command, "ACCEPT")==0) {
@@ -90,19 +90,18 @@ bool parse_ruleset(ruleset_t *ruleset, const char *file) {
 
             if(++(ruleset->num_rules)==ruleset->rules_size) {
                 ruleset->rules_size<<=1;
-                if((ruleset->rules=realloc(ruleset->rules, sizeof(struct rte_bv_classifier_key *)*ruleset->rules_size))==NULL) {
+                if((ruleset->rules=realloc(ruleset->rules, sizeof(struct rte_table_bv_key *)*ruleset->rules_size))==NULL) {
                     fprintf(stderr, "ERROR: could not realloc memory for rules!\n");
                     goto failure;
                 }
 
-                if((ruleset->actions=realloc(ruleset->actions, sizeof(uint8_t)*ruleset->rules_size))==NULL) {
+				if((ruleset->actions=realloc(ruleset->actions, sizeof(uint8_t)*ruleset->rules_size))==NULL) {
                     fprintf(stderr, "ERROR: could not realloc memory for actions!\n");
                     goto failure;
                 }
 
                 for(size_t i=ruleset->rules_size>>1; i<ruleset->rules_size; ++i) {
                     if((ruleset->rules[i]=malloc(sizeof(struct rte_bv_classifier_key)))==NULL) {
-
                         fprintf(stderr, "ERROR: could not allocate memory for %luth rule!\n", i);
                         goto failure;
                     }
@@ -130,11 +129,11 @@ failure:
         }
 
         free(ruleset->rules);
-        free(ruleset->actions);
-    }
+		free(ruleset->actions);
+	}
 
     ruleset->rules=NULL;
-    ruleset->actions=NULL;
+	ruleset->actions=NULL;
 
     fclose(fd);
     return false;
@@ -148,11 +147,11 @@ void free_ruleset(ruleset_t *ruleset) {
         }
 
         free(ruleset->rules);
-        free(ruleset->actions);
-    }
+    	free(ruleset->actions);
+	}
 
-    ruleset->rules=NULL;
-    ruleset->actions=NULL;
+   	ruleset->rules=NULL;
+	ruleset->actions=NULL;
 }
 
 void free_ruleset_except_actions(ruleset_t *ruleset) {
@@ -163,9 +162,9 @@ void free_ruleset_except_actions(ruleset_t *ruleset) {
         }
 
         free(ruleset->rules);
-    }
+	}
 
-    ruleset->rules=NULL;
+   	ruleset->rules=NULL;
 }
 
 static int parse_range(const char *s, uint32_t *out) {

@@ -5,7 +5,6 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include "rte_bv.h"
-#include "rte_bv_classifier.h"
 
 #define INITIAL_BUFSIZE 16
 

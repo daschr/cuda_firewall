@@ -10,10 +10,21 @@ extern "C" {
 #include <rte_malloc.h>
 #include <stdlib.h>
 
+#define NUM_BLOCKS 2
+#define WORKERS_PER_PACKET 32
+#define PACKETS_PER_BLOCK 32
+
+#ifdef RTE_TABLE_STATS_COLLECT
+#define RTE_BV_CLASSIFIER_STATS_PKTS_IN_ADD(table, val) table->stats.n_pkts_in += val
+#define RTE_BV_CLASSIFIER_STATS_PKTS_LOOKUP_MISS(table, val) table->stats.n_pkts_lookup_miss += val
+#else
+#define RTE_BV_CLASSIFIER_STATS_PKTS_IN_ADD(table, val)
+#define RTE_BV_CLASSIFIER_STATS_PKTS_LOOKUP_MISS(table, val)
+#endif
 
 static inline int is_error(cudaError_t e, const char *file, int line) {
     if(e!=cudaSuccess) {
-        fprintf(stderr, "[rte_bv_classifier] error: %s in %s (line %d)\n", cudaGetErrorString(e), file, line);
+        rte_log(RTE_LOG_ERR, RTE_LOGTYPE_TABLE, "[rte_bv_classifier] error: %s in %s (line %d)\n", cudaGetErrorString(e), file, line);
         return 1;
     }
     return 0;
@@ -23,25 +34,34 @@ int rte_bv_classifier_free(struct rte_bv_classifier *c) {
     if(c==NULL)
         return 0;
 
-    cudaFreeHost(c->act_buf);
-    for(size_t i=0; i<c->num_fields<<1; ++i) {
-        cudaFree(c->ranges_db[i]);
-        cudaFree(c->bvs_db[i]);
+    for(size_t i=0; i<c->num_fields; ++i) {
+        cudaFree(c->ranges_from[i]);
+        cudaFree(c->ranges_to[i]);
+        cudaFree(c->bvs[i]);
     }
-
-    cudaFree(c->ranges_db_dev);
-    cudaFree(c->bvs_db_dev);
+    cudaFree(c->ranges_from_dev);
+    cudaFree(c->ranges_to_dev);
+    cudaFree(c->bvs_dev);
 
     cudaFree(c->num_ranges);
     cudaFree(c->field_offsets);
     cudaFree(c->field_sizes);
 
+    cudaFreeHost(c->entries);
+    cudaFreeHost(c->lookup_hit_mask);
+
+    for(size_t i=0; i<RTE_BV_CLASSIFIER_NUM_STREAMS; ++i) {
+        cudaFreeHost(c->matched_entries_h[i]);
+        cudaFreeHost(c->pkts_data_h[i]);
+    }
+
     for(uint32_t i=0; i<c->num_fields; ++i)
         rte_bv_markers_free(c->bv_markers+i);
 
     rte_free(c->bv_markers);
-    rte_free(c->ranges_db);
-    rte_free(c->bvs_db);
+    rte_free(c->ranges_from);
+    rte_free(c->ranges_to);
+    rte_free(c->bvs);
 
     rte_free(c);
 
@@ -50,59 +70,60 @@ int rte_bv_classifier_free(struct rte_bv_classifier *c) {
 
 #define IS_ERROR(X) is_error(X, __FILE__, __LINE__)
 
-struct rte_bv_classifier *rte_bv_classifier_create(struct rte_bv_classifier_params *params, int socket_id) {
-    struct rte_bv_classifier_params *p=params;
-    struct rte_bv_classifier *c=(struct rte_bv_classifier *) rte_malloc("c", sizeof(struct rte_bv_classifier), 0);
+struct rte_bv_classifier *rte_bv_classifier_create(struct rte_bv_classifier_params *p, int socket_id, uint32_t entry_size) {
+    struct rte_bv_classifier *c=(struct rte_bv_classifier *) rte_malloc("rte_bv_classifier", sizeof(struct rte_bv_classifier), 0);
     memset(c, 0, sizeof(struct rte_bv_classifier));
 
     c->num_fields=p->num_fields;
     c->field_defs=p->field_defs;
+    c->num_rules=p->num_rules;
+    c->entry_size=entry_size;
 
-    c->ranges_db=(uint32_t **) rte_malloc("ranges_db", sizeof(uint32_t *)*(c->num_fields<<1), 0);
-    c->bvs_db=(uint32_t **) rte_malloc("bvs_db", sizeof(uint32_t *)*(c->num_fields<<1), 0);
+    c->ranges_from=(uint32_t **) rte_malloc("ranges_from", sizeof(uint32_t *)*c->num_fields, 0);
+    c->ranges_to=(uint32_t **) rte_malloc("ranges_to", sizeof(uint32_t *)*c->num_fields, 0);
+    c->bvs=(uint32_t **) rte_malloc("bvs_db", sizeof(uint32_t *)*c->num_fields, 0);
+
 #define CHECK(X) if(IS_ERROR(X)) return NULL
-#define HOSTALLOC(DP, HP, SIZE, MODE)	CHECK(cudaHostAlloc((void **) &HP, SIZE, cudaHostAllocMapped | MODE)); \
-    								CHECK(cudaHostGetDevicePointer((void **) &DP, (void *) HP, 0));
 
-    HOSTALLOC(c->act_buf, c->act_buf_h, sizeof(uint8_t), 0);
-
-    for(size_t stream=0; stream<RTE_BV_CLASSIFIER_NUM_STREAMS; ++stream) {
-        CHECK(cudaStreamCreateWithFlags(c->streams+stream, 0));
-
-        HOSTALLOC(c->pkts_data[stream], c->pkts_data_h[stream], sizeof(uint8_t*)*RTE_BV_CLASSIFIER_MAX_PKTS, cudaHostAllocWriteCombined);
-        HOSTALLOC(c->packet_types[stream], c->packet_types_h[stream], sizeof(uint32_t)*RTE_BV_CLASSIFIER_MAX_PKTS, cudaHostAllocWriteCombined);
-        HOSTALLOC(c->positions[stream], c->positions_h[stream], sizeof(uint32_t)*RTE_BV_CLASSIFIER_MAX_PKTS, 0);
-        HOSTALLOC(c->lookup_hit_mask[stream], c->lookup_hit_mask_h[stream], sizeof(uint64_t), 0);
-
-        c->stream_running[stream]=0;
-        c->stream_running_mtx[stream]=PTHREAD_MUTEX_INITIALIZER;
+    for(size_t i=0; i<RTE_BV_CLASSIFIER_NUM_STREAMS; ++i) {
+        CHECK(cudaHostAlloc((void **) &c->pkts_data_h[i], sizeof(uint8_t*)*RTE_BV_CLASSIFIER_MAX_PKTS, cudaHostAllocMapped|cudaHostAllocWriteCombined));
+        CHECK(cudaHostGetDevicePointer((void **) &c->pkts_data[i], c->pkts_data_h[i], 0));
+        CHECK(cudaHostAlloc((void **) &c->matched_entries_h[i], sizeof(void *)*RTE_BV_CLASSIFIER_MAX_PKTS, cudaHostAllocMapped));
+        CHECK(cudaHostGetDevicePointer((void **) &c->matched_entries[i], c->matched_entries_h[i], 0));
     }
 
-    c->enqueue_pos=0;
-    c->dequeue_pos=0;
+    CHECK(cudaHostAlloc((void **) &c->entries, c->entry_size*c->num_rules, cudaHostAllocMapped));
 
-    CHECK(cudaMalloc((void **) &c->ranges_db_dev, 		sizeof(uint32_t *)*	c->num_fields*2));
-    CHECK(cudaMalloc((void **) &c->bvs_db_dev, 			sizeof(uint32_t *)*	c->num_fields*2));
-    CHECK(cudaMalloc((void **) &c->field_offsets, 		sizeof(uint32_t)  *	c->num_fields));
-    CHECK(cudaMalloc((void **) &c->field_ptype_masks, 	sizeof(uint32_t)  *	c->num_fields));
-    CHECK(cudaMalloc((void **) &c->field_sizes, 		sizeof(uint32_t)  *	c->num_fields));
-    CHECK(cudaMalloc((void **) &c->num_ranges, 			sizeof(size_t)    *	c->num_fields));
+    CHECK(cudaMalloc((void **) &c->ranges_from_dev, sizeof(uint32_t *)*c->num_fields));
+    CHECK(cudaMalloc((void **) &c->ranges_to_dev, sizeof(uint32_t *)*c->num_fields));
+    CHECK(cudaMalloc((void **) &c->bvs_dev, sizeof(uint32_t *)*c->num_fields));
+    CHECK(cudaMalloc((void **) &c->field_offsets, sizeof(uint32_t)*c->num_fields));
+    CHECK(cudaMalloc((void **) &c->field_sizes, sizeof(uint32_t)*c->num_fields));
+    CHECK(cudaMalloc((void **) &c->num_ranges, sizeof(uint64_t)*c->num_fields));
+
+    CHECK(cudaHostAlloc((void **) &c->lookup_hit_mask_h, sizeof(uint64_t)*RTE_BV_CLASSIFIER_NUM_STREAMS, cudaHostAllocMapped));
+    CHECK(cudaHostGetDevicePointer((void **) &c->lookup_hit_mask, c->lookup_hit_mask_h, 0));
+
+    c->ptype_mask=UINT32_MAX;
 
     for(size_t i=0; i<c->num_fields; ++i) {
-        CHECK(cudaMemcpy(c->field_offsets+i, 		&c->field_defs[i].offset, 		sizeof(uint32_t), cudaMemcpyHostToDevice));
-        CHECK(cudaMemcpy(c->field_sizes+i, 			&c->field_defs[i].size, 		sizeof(uint32_t), cudaMemcpyHostToDevice));
-        CHECK(cudaMemcpy(c->field_ptype_masks+i, 	&c->field_defs[i].ptype_mask, 	sizeof(uint32_t), cudaMemcpyHostToDevice));
+        CHECK(cudaMemcpy(c->field_offsets+i, &c->field_defs[i].offset, sizeof(uint32_t), cudaMemcpyHostToDevice));
+        CHECK(cudaMemcpy(c->field_sizes+i, &c->field_defs[i].size, sizeof(uint32_t), cudaMemcpyHostToDevice));
+        c->ptype_mask&=c->field_defs[i].ptype_mask;
 
-        CHECK(cudaMalloc((void **) &c->ranges_db[i], 				sizeof(uint32_t)*RTE_BV_CLASSIFIER_MAX_RANGES*2));
-        CHECK(cudaMalloc((void **) &c->ranges_db[c->num_fields+i], 	sizeof(uint32_t)*RTE_BV_CLASSIFIER_MAX_RANGES*2));
-        CHECK(cudaMalloc((void **) &c->bvs_db[i], 					sizeof(uint32_t)*RTE_BV_CLASSIFIER_BS*RTE_BV_CLASSIFIER_MAX_RANGES*2));
-        CHECK(cudaMalloc((void **) &c->bvs_db[c->num_fields+i], 	sizeof(uint32_t)*RTE_BV_CLASSIFIER_BS*RTE_BV_CLASSIFIER_MAX_RANGES*2));
+        CHECK(cudaMalloc((void **) &c->ranges_from[i], sizeof(uint32_t)*((size_t) RTE_BV_CLASSIFIER_MAX_RANGES)));
+        CHECK(cudaMalloc((void **) &c->ranges_to[i], sizeof(uint32_t)*((size_t) RTE_BV_CLASSIFIER_MAX_RANGES)));
+        CHECK(cudaMalloc((void **) &c->bvs[i], sizeof(uint32_t)*((size_t) RTE_BV_CLASSIFIER_BS) * ((size_t ) RTE_BV_CLASSIFIER_MAX_RANGES)));
+
+
     }
 
-    CHECK(cudaMemcpy(c->ranges_db_dev, 	c->ranges_db, 	sizeof(uint32_t *)*c->num_fields*2, cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpy(c->bvs_db_dev, 	c->bvs_db, 		sizeof(uint32_t *)*c->num_fields*2, cudaMemcpyHostToDevice));
 
-#undef HOSTALLOC
+
+    CHECK(cudaMemcpy(c->ranges_from_dev, c->ranges_from, sizeof(uint32_t *)*c->num_fields, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(c->ranges_to_dev, c->ranges_to, sizeof(uint32_t *)*c->num_fields, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(c->bvs_dev, c->bvs, sizeof(uint32_t *)*c->num_fields, cudaMemcpyHostToDevice));
+    CHECK(cudaDeviceSetCacheConfig(cudaFuncCachePreferL1));
 #undef CHECK
 
     c->bv_markers=(rte_bv_markers_t *) rte_malloc("bv_markers", sizeof(rte_bv_markers_t)*c->num_fields, 0);
@@ -110,7 +131,7 @@ struct rte_bv_classifier *rte_bv_classifier_create(struct rte_bv_classifier_para
     for(size_t i=0; i<c->num_fields; ++i) {
         if(rte_bv_markers_create(&c->bv_markers[i])) {
             rte_bv_classifier_free(c);
-            rte_log(RTE_LOG_ERR, RTE_LOGTYPE_HASH, "Error creating marker!\n");
+            rte_log(RTE_LOG_ERR, RTE_LOGTYPE_TABLE, "Error creating marker!\n");
             return NULL;
         }
     }
@@ -119,7 +140,7 @@ struct rte_bv_classifier *rte_bv_classifier_create(struct rte_bv_classifier_para
 }
 #undef IS_ERROR
 
-static inline void cal_from_to(uint32_t *from_to, uint32_t *v, uint8_t type, uint8_t size) {
+inline void cal_from_to(uint32_t *from_to, uint32_t *v, uint8_t type, uint8_t size) {
     if(type==RTE_BV_CLASSIFIER_FIELD_TYPE_RANGE) {
         from_to[0]=*v;
         from_to[1]=v[1];
@@ -137,40 +158,49 @@ static inline void cal_from_to(uint32_t *from_to, uint32_t *v, uint8_t type, uin
             break;
         default:
 #ifdef DEBUG
-            fprintf(stderr, "[cal_from_to] error: unkown size: %d bits\n", size);
+            fprintf(stderr, "[cal_from_to] error: unknown size: %d bits\n", size);
 #endif
             break;
         }
     }
 }
 
-int rte_bv_classifier_entry_add(struct rte_bv_classifier *c, struct rte_bv_classifier_key *k, uint32_t *pos, int *key_found) {
-    *key_found=0;
+int rte_bv_classifier_entry_add(struct rte_bv_classifier *c, struct rte_bv_classifier_key *k, void *e_r, int *key_found, void **e_ptr) {
+    if(key_found)
+        *key_found=0;
 
     uint32_t from_to[2];
-    uint8_t next_act_buf=*c->act_buf_h^1;
     rte_bv_ranges_t ranges;
 
     for(uint32_t f=0; f<c->num_fields; ++f) {
         cal_from_to(from_to, k->buf +(f<<1), c->field_defs[f].type, c->field_defs[f].size);
-        rte_bv_markers_range_add(c->bv_markers+f, from_to, *pos);
+        rte_bv_markers_range_add(c->bv_markers+f, from_to, k->pos);
 
         memset(&ranges, 0, sizeof(rte_bv_ranges_t));
         ranges.bv_bs=RTE_BV_CLASSIFIER_BS;
-        ranges.ranges=c->ranges_db[(next_act_buf*c->num_fields)+f];
-        ranges.bvs=c->bvs_db[(next_act_buf*c->num_fields)+f];
-        rte_bv_markers_to_ranges(c->bv_markers+f, 1, sizeof(uint32_t), &ranges);
-        cudaMemcpy(c->num_ranges+f, (void *) &ranges.num_ranges, sizeof(uint32_t), cudaMemcpyHostToDevice);
+        ranges.max_num_ranges=RTE_BV_CLASSIFIER_MAX_RANGES;
+        ranges.ranges_from=c->ranges_from[f];
+        ranges.ranges_to=c->ranges_to[f];
+        ranges.bvs=c->bvs[c->num_fields+f];
+        if(rte_bv_markers_to_ranges(c->bv_markers+f, 1, sizeof(uint32_t), &ranges))
+            return 1;
+        cudaMemcpy(c->num_ranges+f, (void *) &ranges.num_ranges, sizeof(uint64_t), cudaMemcpyHostToDevice);
     }
 
-    *c->act_buf_h=next_act_buf;
+    cudaMemcpy(&c->entries[c->entry_size*k->pos], e_r, c->entry_size, cudaMemcpyHostToDevice);
+
+    if(e_ptr)
+        *e_ptr=&c->entries[c->entry_size*k->pos];
 
     return 0;
 }
 
-int rte_bv_classifier_entry_delete(struct rte_bv_classifier *c, struct rte_bv_classifier_key *k) {
+int rte_bv_classifier_entry_delete(struct rte_bv_classifier *c, struct rte_bv_classifier_key *k, int *key_found, __rte_unused void *e) {
+
+    if(key_found)
+        *key_found=0;
+
     uint32_t from_to[2];
-    uint8_t next_act_buf=*c->act_buf_h^1;
     rte_bv_ranges_t ranges;
 
     for(uint32_t f=0; f<c->num_fields; ++f) {
@@ -179,18 +209,21 @@ int rte_bv_classifier_entry_delete(struct rte_bv_classifier *c, struct rte_bv_cl
 
         memset(&ranges, 0, sizeof(rte_bv_ranges_t));
         ranges.bv_bs=RTE_BV_CLASSIFIER_BS;
-        ranges.ranges=c->ranges_db[(next_act_buf*c->num_fields)+f];
-        ranges.bvs=c->bvs_db[(next_act_buf*c->num_fields)+f];
-        rte_bv_markers_to_ranges(c->bv_markers+f, 1, sizeof(uint32_t), &ranges);
-        cudaMemcpy(c->num_ranges+f, (void *) &ranges.num_ranges, sizeof(uint32_t), cudaMemcpyHostToDevice);
+        ranges.max_num_ranges=RTE_BV_CLASSIFIER_MAX_RANGES;
+        ranges.ranges_from=c->ranges_from[f];
+        ranges.ranges_to=c->ranges_to[f];
+        ranges.bvs=c->bvs[f];
+        if(rte_bv_markers_to_ranges(c->bv_markers+f, 1, sizeof(uint32_t), &ranges))
+            return 1;
+        cudaMemcpy(c->num_ranges+f, (void *) &ranges.num_ranges, sizeof(uint64_t), cudaMemcpyHostToDevice);
     }
 
     return 0;
 }
 
-int rte_bv_classifier_entry_add_bulk(struct rte_bv_classifier *c, struct rte_bv_classifier_key **ks, uint32_t n_keys) {
+int rte_bv_classifier_entry_add_bulk(struct rte_bv_classifier *c, struct rte_bv_classifier_key **ks, void **es_r, uint32_t n_keys, int *key_found, __rte_unused void **e_ptr) {
+
     uint32_t from_to[2];
-    uint8_t next_act_buf=*c->act_buf_h^1;
     rte_bv_ranges_t ranges;
 
     for(uint32_t f=0; f<c->num_fields; ++f) {
@@ -201,20 +234,32 @@ int rte_bv_classifier_entry_add_bulk(struct rte_bv_classifier *c, struct rte_bv_
 
         memset(&ranges, 0, sizeof(rte_bv_ranges_t));
         ranges.bv_bs=RTE_BV_CLASSIFIER_BS;
-        ranges.ranges=c->ranges_db[(next_act_buf*c->num_fields)+f];
-        ranges.bvs=c->bvs_db[(next_act_buf*c->num_fields)+f];
-        rte_bv_markers_to_ranges(c->bv_markers+f, 1, sizeof(uint32_t), &ranges);
-        cudaMemcpy(c->num_ranges+f, (void *) &ranges.num_ranges, sizeof(uint32_t), cudaMemcpyHostToDevice);
+        ranges.max_num_ranges=RTE_BV_CLASSIFIER_MAX_RANGES;
+        ranges.ranges_from=c->ranges_from[f];
+        ranges.ranges_to=c->ranges_to[f];
+        ranges.bvs=c->bvs[f];
+        if(rte_bv_markers_to_ranges(c->bv_markers+f, 1, sizeof(uint32_t), &ranges))
+            return 1;
+        cudaMemcpy(c->num_ranges+f, (void *) &ranges.num_ranges, sizeof(uint64_t), cudaMemcpyHostToDevice);
     }
 
-    *c->act_buf_h=next_act_buf;
+
+    for(uint32_t k=0; k<n_keys; ++k) {
+        if(key_found)
+            key_found[k]=0;
+
+        cudaMemcpy(&c->entries[c->entry_size*ks[k]->pos], es_r[ks[k]->pos], c->entry_size, cudaMemcpyHostToDevice);
+
+        if(e_ptr)
+            e_ptr[k]=&c->entries[c->entry_size*ks[k]->pos];
+
+    }
 
     return 0;
 }
 
-int rte_bv_classifier_entry_delete_bulk(struct rte_bv_classifier *c, struct rte_bv_classifier_key **ks, uint32_t n_keys) {
+int rte_bv_classifier_entry_delete_bulk(struct rte_bv_classifier *c, struct rte_bv_classifier_key **ks, uint32_t n_keys, int *key_found, __rte_unused void **es_r) {
     uint32_t from_to[2];
-    uint8_t next_act_buf=*c->act_buf_h^1;
     rte_bv_ranges_t ranges;
 
     for(uint32_t f=0; f<c->num_fields; ++f) {
@@ -225,116 +270,155 @@ int rte_bv_classifier_entry_delete_bulk(struct rte_bv_classifier *c, struct rte_
 
         memset(&ranges, 0, sizeof(rte_bv_ranges_t));
         ranges.bv_bs=RTE_BV_CLASSIFIER_BS;
-        ranges.ranges=c->ranges_db[(next_act_buf*c->num_fields)+f];
-        ranges.bvs=c->bvs_db[(next_act_buf*c->num_fields)+f];
-        rte_bv_markers_to_ranges(c->bv_markers+f, 1, sizeof(uint32_t), &ranges);
-        cudaMemcpy(c->num_ranges+f, (void *) &ranges.num_ranges, sizeof(uint32_t), cudaMemcpyHostToDevice);
+        ranges.max_num_ranges=RTE_BV_CLASSIFIER_MAX_RANGES;
+        ranges.ranges_from=c->ranges_from[f];
+        ranges.ranges_to=c->ranges_to[f];
+        ranges.bvs=c->bvs[f];
+        if(rte_bv_markers_to_ranges(c->bv_markers+f, 1, sizeof(uint32_t), &ranges))
+            return 1;
+        cudaMemcpy(c->num_ranges+f, (void *) &ranges.num_ranges, sizeof(uint64_t), cudaMemcpyHostToDevice);
     }
 
-    *c->act_buf_h=next_act_buf;
+    if(key_found)
+        for(uint32_t k=0; k<n_keys; ++k)
+            key_found[k]=0;
 
     return 0;
 }
 
-__global__ void bv_search(	 uint32_t **ranges,  uint64_t *num_ranges,  uint32_t *offsets,  uint8_t *sizes,
-                             uint32_t *ptype_mask,  uint32_t **bvs, const uint32_t bv_bs,
-                             const ulong pkts_mask, uint8_t **pkts, uint32_t *__restrict__ pkts_type,
-                             volatile uint *__restrict__ positions, volatile ulong *__restrict__ lookup_hit_mask) {
+__global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from, uint32_t *__restrict__ *__restrict__ ranges_to,
+                            const uint64_t *__restrict__ num_ranges, const uint32_t *__restrict__ offsets,  uint8_t *__restrict__ sizes,
+                            uint32_t *__restrict__ *__restrict__ bvs, const uint32_t bv_bs,
+                            const uint32_t num_fields, const uint32_t entry_size, const uint8_t *__restrict__ entries,
+                            const ulong pkts_mask, uint8_t *__restrict__ *__restrict__ pkts,
+                            void *__restrict__ *matched_entries, ulong *__restrict__ lookup_hit_mask) {
 
-    if(!((pkts_mask>>blockIdx.x)&1))
-        return;
+    __shared__ uint *bv[RTE_BV_CLASSIFIER_MAX_PKTS][RTE_BV_CLASSIFIER_MAX_FIELDS];
+    __shared__ uint64_t c_lookup_hit_mask;
 
-    uint8_t *pkt;
-    __shared__ uint *bv[24];
-    __shared__ bool field_found[24];
-    uint v=0;
-
-    field_found[threadIdx.x]=false;
-
-    const uint32_t ptype_a=pkts_type[blockIdx.x]&ptype_mask[threadIdx.x];
-    const bool ptype_matches=  (ptype_a&RTE_PTYPE_L2_MASK)!=0
-                               & (ptype_a&RTE_PTYPE_L3_MASK)!=0
-                               & (ptype_a&RTE_PTYPE_L4_MASK)!=0;
-
-    if(ptype_matches) {
-        pkt=pkts[blockIdx.x]+offsets[threadIdx.x];
-
-        switch(sizes[threadIdx.x]) {
-        case 1:
-            v=*pkt;
-            break;
-        case 2:
-            v=pkt[1]+(pkt[0]<<8);
-            break;
-        case 4:
-            v=pkt[3]+(pkt[2]<<8)+(pkt[1]<<16)+(pkt[0]<<24);
-            break;
-        default:
-            printf("[%d|%d] unknown size: %ubit\n", blockIdx.x, threadIdx.x, sizes[threadIdx.x]);
-            break;
-        }
-
-        uint *range_dim=ranges[threadIdx.x];
-        long se[]= {0, (long) num_ranges[threadIdx.x]};
-        uint8_t l,r;
-        bv[threadIdx.x]=NULL;
-        for(long i=se[1]>>1; se[0]<=se[1]; i=(se[0]+se[1])>>1) {
-            l=v>=range_dim[i<<1];
-            r=v<=range_dim[(i<<1)+1];
-            if(l&r) {
-                bv[threadIdx.x]=bvs[threadIdx.x]+i*RTE_BV_CLASSIFIER_BS;
-                field_found[threadIdx.x]=true;
-                break;
-            }
-
-            se[!l]=!l?i-1:i+1;
-        }
+    if(!(threadIdx.x|threadIdx.y|threadIdx.z)) {
+        c_lookup_hit_mask=0;
+        __threadfence_block();
     }
 
-    __syncthreads();
-    if(!threadIdx.x) {
-        uint x, pos;
-        for(uint i=0; i<bv_bs; ++i) {
-            x=0xffffffff;
-            for(uint b=0; b<blockDim.x; ++b) {
-                if(!field_found[b])
-                    goto end;
-                x&=bv[b][i];
-            }
+    const int pkt_id=(blockDim.y*blockIdx.x+threadIdx.y);
+    if(!((pkts_mask>>pkt_id)&1))
+        return;
 
-            if((pos=__ffs(x))!=0) {
-                positions[blockIdx.x]=(i<<5)+pos-1;
-                atomicOr((unsigned long long *)lookup_hit_mask, 1<<blockIdx.x);
+    for(int field_id=0; field_id<num_fields; ++field_id) {
+        uint v;
+        if(!threadIdx.x) {
+            bv[pkt_id][field_id]=NULL;
+            const uint8_t *pkt=(uint8_t * ) pkts[pkt_id]+offsets[field_id];
+            switch(sizes[field_id]) {
+            case 1:
+                v=*pkt;
+                break;
+            case 2:
+                v=pkt[1]|(pkt[0]<<8);
+                break;
+            case 4:
+                v=pkt[3]|(pkt[2]<<8)|(pkt[1]<<16)|(pkt[0]<<24);
+                break;
+            default:
+                printf("[%d|%d] unknown size: %u byte\n", blockIdx.x, threadIdx.y, sizes[field_id]);
+                break;
+            }
+        }
+        v=__shfl_sync(UINT32_MAX, v, 0);
+
+
+        long size=num_ranges[field_id]>>5;
+        long start=0, offset;
+        uint32_t l,r; //left, right
+        __syncwarp();
+
+        while(size) {
+            offset=start+((long) threadIdx.x)*size;
+            l=__ballot_sync(UINT32_MAX, v>=ranges_from[field_id][offset]);
+            r=__ballot_sync(UINT32_MAX, v<=ranges_to[field_id][offset]);
+            if(l&r) {
+                if((__ffs(l&r)-1)==threadIdx.x)
+                    bv[pkt_id][field_id]=bvs[field_id]+offset*RTE_BV_CLASSIFIER_BS;
+                goto found_bv;
+            }
+            if(!l)
+                goto found_bv;
+
+            //reuse r to save one register per thread
+            r=__popc(l)-1;
+            start=__shfl_sync(UINT32_MAX, offset+1, r);
+            size=r==31?(num_ranges[field_id]-start)>>5:(size-1)>>5;
+
+            __syncwarp();
+        }
+        offset=start+threadIdx.x;
+        l=__ballot_sync(UINT32_MAX, offset<num_ranges[field_id]?v>=ranges_from[field_id][offset]:0);
+        r=__ballot_sync(UINT32_MAX, offset<num_ranges[field_id]?v<=ranges_to[field_id][offset]:0);
+        if(l&r) {
+            if((__ffs(l&r)-1)==threadIdx.x)
+                bv[pkt_id][field_id]=bvs[field_id]+offset*RTE_BV_CLASSIFIER_BS;
+        }
+
+found_bv:
+        if(!bv[pkt_id][field_id])
+            goto end;
+    }
+    {
+        __syncwarp();
+        // all bitvectors found, now getting highest-priority rule
+        uint x, tm;
+        for(int bv_block=threadIdx.x; bv_block<bv_bs; bv_block+=blockDim.x) { // TODO maybe use WORKERS_PER_PACKET
+            x=UINT32_MAX;
+            for(int field_id=0; field_id<num_fields; ++field_id)
+                x&=bv[pkt_id][field_id][bv_block];
+
+            __syncwarp(__activemask()); //TODO maybe remove
+            if((tm=__ballot_sync(__activemask(), __ffs(x)))) {
+                if((__ffs(tm)-1)==threadIdx.x) {
+                    matched_entries[pkt_id]=(void *) &entries[entry_size*((bv_block<<5)+__ffs(x)-1)];
+                    //positions[pkt_id]=(bv_block<<5)+__ffs(x)-1;
+                    atomicOr((unsigned long long int *)&c_lookup_hit_mask, 1LU<<pkt_id);
+                }
                 break;
             }
         }
     }
 end:
+
     __syncthreads();
+
+    if(!(threadIdx.x|threadIdx.y|threadIdx.z)) {
+        atomicOr((unsigned long long int *) lookup_hit_mask, c_lookup_hit_mask);
+        __threadfence_system();
+    }
 }
 
 void rte_bv_classifier_enqueue_burst(struct rte_bv_classifier *c, struct rte_mbuf **pkts, uint64_t pkts_mask) {
     const uint32_t n_pkts_in=__builtin_popcountll(pkts_mask);
     const size_t epos=c->enqueue_pos;
-
     for(;;) {
         pthread_mutex_lock(&c->stream_running_mtx[epos]);
         if(!c->stream_running[epos]) {
-
+            uint64_t real_pkts_mask=0;
             c->pkts_mask[epos]=pkts_mask;
             c->pkts[epos]=pkts;
 
-            for(uint32_t i=0; i<n_pkts_in; ++i)
-                if((pkts_mask>>i)&1) {
+            for(uint32_t i=0; i<n_pkts_in; ++i) {
+                const uint32_t mp=pkts[i]->packet_type&c->ptype_mask;
+                if((pkts_mask>>i)&1&((mp&RTE_PTYPE_L2_MASK)!=0)&((mp&RTE_PTYPE_L3_MASK)!=0)&((mp&RTE_PTYPE_L4_MASK)!=0)) {
                     c->pkts_data_h[epos][i]=rte_pktmbuf_mtod(pkts[i], uint8_t *);
-                    c->packet_types_h[epos][i]=pkts[i]->packet_type;
+                    real_pkts_mask|=1LU<<i;
                 }
+            }
 
-            bv_search<<<64, c->num_fields, 0, c->streams[epos]>>>(c->ranges_db_dev+(c->num_fields*(*c->act_buf_h)), c->num_ranges,
-                    c->field_offsets, c->field_sizes, c->field_ptype_masks,
-                    c->bvs_db_dev+(c->num_fields*(*c->act_buf_h)), RTE_BV_CLASSIFIER_BS,
-                    pkts_mask, c->pkts_data[epos], c->packet_types[epos],
-                    c->positions[epos], c->lookup_hit_mask[epos]);
+            bv_search<<<NUM_BLOCKS, dim3{WORKERS_PER_PACKET, PACKETS_PER_BLOCK}, 0, c->streams[epos]>>>(
+                c->ranges_from_dev, c->ranges_to_dev, c->num_ranges,
+                c->field_offsets, c->field_sizes,
+                c->bvs_dev, RTE_BV_CLASSIFIER_BS, c->num_fields, c->entry_size, c->entries,
+                real_pkts_mask, c->pkts_data[epos],
+                c->matched_entries[epos], &c->lookup_hit_mask[epos]);
+
             c->stream_running[epos]=1;
             c->enqueue_pos=(epos+1)&RTE_BV_CLASSIFIER_NUM_STREAMS_MASK;
             pthread_mutex_unlock(&c->stream_running_mtx[epos]);
@@ -345,7 +429,7 @@ void rte_bv_classifier_enqueue_burst(struct rte_bv_classifier *c, struct rte_mbu
 
 }
 
-void __rte_noreturn rte_bv_classifier_poll_lookups(struct rte_bv_classifier *c, void (*callback) (struct rte_mbuf **, uint64_t,  uint64_t, uint32_t *, void *), void *p) {
+void __rte_noreturn rte_bv_classifier_poll_lookups(struct rte_bv_classifier *c, void (*callback) (struct rte_mbuf **, uint64_t,  uint64_t, void **, void *), void *p) {
     size_t dpos=0;
     uint8_t stream_running;
 
@@ -358,7 +442,7 @@ void __rte_noreturn rte_bv_classifier_poll_lookups(struct rte_bv_classifier *c, 
 
         cudaStreamSynchronize(c->streams[dpos]);
 
-        callback(c->pkts[dpos], c->pkts_mask[dpos], *(c->lookup_hit_mask_h[dpos]), c->positions_h[dpos], p);
+        callback(c->pkts[dpos], c->pkts_mask[dpos], c->lookup_hit_mask_h[dpos], c->matched_entries[dpos], p);
 
         pthread_mutex_lock(&c->stream_running_mtx[dpos]);
         c->stream_running[dpos]=0;
@@ -377,6 +461,7 @@ int rte_bv_classifier_stats_read(struct rte_bv_classifier *c, struct rte_table_s
 
     return 0;
 }
+
 
 #ifdef __cplusplus
 }
