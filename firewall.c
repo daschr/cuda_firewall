@@ -150,8 +150,10 @@ static int firewall(void *arg) {
                     continue;
                 }
 
-                if(unlikely(*(actions[i])==RULE_DROP))
+                if(unlikely(*(actions[i])==RULE_DROP)) {
+                    rte_pktmbuf_free(bufs_rx[i]);
                     continue;
+                }
 
                 bufs_tx[j++]=bufs_rx[i];
                 if(conf->tap_macaddr!=NULL)
@@ -164,11 +166,6 @@ static int firewall(void *arg) {
             stats->pkts_out+=nb_tx;
             stats->pkts_accepted+=j;
             stats->pkts_dropped+=nb_rx-j;
-
-            if(unlikely(nb_tx<nb_rx)) {
-                for(uint16_t b=nb_tx; b<nb_rx; ++b)
-                    rte_pktmbuf_free(bufs_rx[b]);
-            }
         }
     } else {
         struct rte_mbuf *bufs_rx[BURST_SIZE];
@@ -311,7 +308,7 @@ int main(int ac, char *as[]) {
         fdefs[i].size=fdefs_sizes[i];
     }
 
-    struct rte_table_bv_params table_params = { .num_fields=5, .field_defs=fdefs, .num_rules=40000 };
+    struct rte_table_bv_params table_params = { .num_fields=5, .field_defs=fdefs, .num_rules=ruleset.num_rules };
 
     void *table=rte_table_bv_ops.f_create(&table_params, rte_socket_id(), 1);
 
