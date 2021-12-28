@@ -53,7 +53,9 @@ int rte_bv_classifier_free(struct rte_bv_classifier *c) {
     for(size_t i=0; i<RTE_BV_CLASSIFIER_NUM_STREAMS; ++i) {
         cudaFreeHost(c->matched_entries_h[i]);
         cudaFreeHost(c->pkts_data_h[i]);
-    }
+        cudaStreamDestroy(c->streams[i]);
+    	rte_free(c->pkts[i]);
+	}
 
     for(uint32_t i=0; i<c->num_fields; ++i)
         rte_bv_markers_free(c->bv_markers+i);
@@ -79,6 +81,9 @@ struct rte_bv_classifier *rte_bv_classifier_create(struct rte_bv_classifier_para
     c->num_rules=p->num_rules;
     c->entry_size=entry_size;
 
+    c->enqueue_pos=0;
+    c->dequeue_pos=0;
+
     c->ranges_from=(uint32_t **) rte_malloc("ranges_from", sizeof(uint32_t *)*c->num_fields, 0);
     c->ranges_to=(uint32_t **) rte_malloc("ranges_to", sizeof(uint32_t *)*c->num_fields, 0);
     c->bvs=(uint32_t **) rte_malloc("bvs_db", sizeof(uint32_t *)*c->num_fields, 0);
@@ -86,10 +91,12 @@ struct rte_bv_classifier *rte_bv_classifier_create(struct rte_bv_classifier_para
 #define CHECK(X) if(IS_ERROR(X)) return NULL
 
     for(size_t i=0; i<RTE_BV_CLASSIFIER_NUM_STREAMS; ++i) {
-        CHECK(cudaHostAlloc((void **) &c->pkts_data_h[i], sizeof(uint8_t*)*RTE_BV_CLASSIFIER_MAX_PKTS, cudaHostAllocMapped|cudaHostAllocWriteCombined));
+        CHECK(cudaHostAlloc((void **) &c->pkts_data_h[i], sizeof(uint8_t*)*RTE_BV_CLASSIFIER_MAX_PKTS, cudaHostAllocMapped));
         CHECK(cudaHostGetDevicePointer((void **) &c->pkts_data[i], c->pkts_data_h[i], 0));
         CHECK(cudaHostAlloc((void **) &c->matched_entries_h[i], sizeof(void *)*RTE_BV_CLASSIFIER_MAX_PKTS, cudaHostAllocMapped));
         CHECK(cudaHostGetDevicePointer((void **) &c->matched_entries[i], c->matched_entries_h[i], 0));
+        CHECK(cudaStreamCreateWithFlags(&c->streams[i], cudaStreamNonBlocking));
+        c->pkts[i]=(struct rte_mbuf **) rte_malloc("pkts", sizeof(struct rte_mbuf *)*RTE_BV_CLASSIFIER_MAX_PKTS, 0);
     }
 
     CHECK(cudaHostAlloc((void **) &c->entries, c->entry_size*c->num_rules, cudaHostAllocMapped));
@@ -114,11 +121,7 @@ struct rte_bv_classifier *rte_bv_classifier_create(struct rte_bv_classifier_para
         CHECK(cudaMalloc((void **) &c->ranges_from[i], sizeof(uint32_t)*((size_t) RTE_BV_CLASSIFIER_MAX_RANGES)));
         CHECK(cudaMalloc((void **) &c->ranges_to[i], sizeof(uint32_t)*((size_t) RTE_BV_CLASSIFIER_MAX_RANGES)));
         CHECK(cudaMalloc((void **) &c->bvs[i], sizeof(uint32_t)*((size_t) RTE_BV_CLASSIFIER_BS) * ((size_t ) RTE_BV_CLASSIFIER_MAX_RANGES)));
-
-
     }
-
-
 
     CHECK(cudaMemcpy(c->ranges_from_dev, c->ranges_from, sizeof(uint32_t *)*c->num_fields, cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(c->ranges_to_dev, c->ranges_to, sizeof(uint32_t *)*c->num_fields, cudaMemcpyHostToDevice));
@@ -138,7 +141,7 @@ struct rte_bv_classifier *rte_bv_classifier_create(struct rte_bv_classifier_para
 
     return c;
 }
-#undef IS_ERROR
+//#undef IS_ERROR
 
 inline void cal_from_to(uint32_t *from_to, uint32_t *v, uint8_t type, uint8_t size) {
     if(type==RTE_BV_CLASSIFIER_FIELD_TYPE_RANGE) {
@@ -335,11 +338,13 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from, uin
 
         while(size) {
             offset=start+((long) threadIdx.x)*size;
+            __syncwarp();
             l=__ballot_sync(UINT32_MAX, v>=ranges_from[field_id][offset]);
             r=__ballot_sync(UINT32_MAX, v<=ranges_to[field_id][offset]);
             if(l&r) {
                 if((__ffs(l&r)-1)==threadIdx.x)
                     bv[pkt_id][field_id]=bvs[field_id]+offset*RTE_BV_CLASSIFIER_BS;
+                __syncwarp();
                 goto found_bv;
             }
             if(!l)
@@ -397,56 +402,43 @@ end:
 void rte_bv_classifier_enqueue_burst(struct rte_bv_classifier *c, struct rte_mbuf **pkts, uint64_t pkts_mask) {
     const uint32_t n_pkts_in=__builtin_popcountll(pkts_mask);
     const size_t epos=c->enqueue_pos;
-    for(;;) {
-        pthread_mutex_lock(&c->stream_running_mtx[epos]);
-        if(!c->stream_running[epos]) {
-            uint64_t real_pkts_mask=0;
-            c->pkts_mask[epos]=pkts_mask;
-            c->pkts[epos]=pkts;
+    while(__atomic_load_n(&c->stream_running[epos], __ATOMIC_RELAXED));
 
-            for(uint32_t i=0; i<n_pkts_in; ++i) {
-                const uint32_t mp=pkts[i]->packet_type&c->ptype_mask;
-                if((pkts_mask>>i)&1&((mp&RTE_PTYPE_L2_MASK)!=0)&((mp&RTE_PTYPE_L3_MASK)!=0)&((mp&RTE_PTYPE_L4_MASK)!=0)) {
-                    c->pkts_data_h[epos][i]=rte_pktmbuf_mtod(pkts[i], uint8_t *);
-                    real_pkts_mask|=1LU<<i;
-                }
-            }
+    uint64_t real_pkts_mask=0;
+    c->pkts_mask[epos]=pkts_mask;
 
-            bv_search<<<NUM_BLOCKS, dim3{WORKERS_PER_PACKET, PACKETS_PER_BLOCK}, 0, c->streams[epos]>>>(
-                c->ranges_from_dev, c->ranges_to_dev, c->num_ranges,
-                c->field_offsets, c->field_sizes,
-                c->bvs_dev, RTE_BV_CLASSIFIER_BS, c->num_fields, c->entry_size, c->entries,
-                real_pkts_mask, c->pkts_data[epos],
-                c->matched_entries[epos], &c->lookup_hit_mask[epos]);
-
-            c->stream_running[epos]=1;
-            c->enqueue_pos=(epos+1)&RTE_BV_CLASSIFIER_NUM_STREAMS_MASK;
-            pthread_mutex_unlock(&c->stream_running_mtx[epos]);
-            break;
-        }
-        pthread_mutex_unlock(&c->stream_running_mtx[epos]);
+    for(uint32_t i=0; i<n_pkts_in; ++i) {
+        c->pkts[epos][i]=pkts[i];
+        c->pkts_data_h[epos][i]=rte_pktmbuf_mtod(pkts[i], uint8_t *);
+        const uint32_t mp=pkts[i]->packet_type&c->ptype_mask;
+        if((pkts_mask>>i)&1&((mp&RTE_PTYPE_L2_MASK)!=0)&((mp&RTE_PTYPE_L3_MASK)!=0)&((mp&RTE_PTYPE_L4_MASK)!=0))
+            real_pkts_mask|=1LU<<i;
     }
 
+    bv_search<<<NUM_BLOCKS, dim3{WORKERS_PER_PACKET, PACKETS_PER_BLOCK}, 0, c->streams[epos]>>>(
+        c->ranges_from_dev, c->ranges_to_dev, c->num_ranges,
+        c->field_offsets, c->field_sizes,
+        c->bvs_dev, RTE_BV_CLASSIFIER_BS, c->num_fields, c->entry_size, c->entries,
+        real_pkts_mask, c->pkts_data[epos],
+        c->matched_entries[epos], &c->lookup_hit_mask[epos]);
+
+    c->enqueue_pos=(epos+1)&RTE_BV_CLASSIFIER_NUM_STREAMS_MASK;
+
+    __atomic_store_n(&c->stream_running[epos], 1, __ATOMIC_RELAXED);
 }
 
 void __rte_noreturn rte_bv_classifier_poll_lookups(struct rte_bv_classifier *c, void (*callback) (struct rte_mbuf **, uint64_t,  uint64_t, void **, void *), void *p) {
     size_t dpos=0;
-    uint8_t stream_running;
 
     for(;;) {
-        do {
-            pthread_mutex_lock(&c->stream_running_mtx[dpos]);
-            stream_running=c->stream_running[dpos];
-            pthread_mutex_unlock(&c->stream_running_mtx[dpos]);
-        } while(!stream_running);
+        while(!__atomic_load_n(&c->stream_running[dpos], __ATOMIC_RELAXED));
 
-        cudaStreamSynchronize(c->streams[dpos]);
+        IS_ERROR(cudaStreamSynchronize(c->streams[dpos]));
 
-        callback(c->pkts[dpos], c->pkts_mask[dpos], c->lookup_hit_mask_h[dpos], c->matched_entries[dpos], p);
+        callback(c->pkts[dpos], *((volatile uint64_t *) &c->pkts_mask[dpos]), *((volatile uint64_t *) &c->lookup_hit_mask_h[dpos]), c->matched_entries[dpos], p);
 
-        pthread_mutex_lock(&c->stream_running_mtx[dpos]);
-        c->stream_running[dpos]=0;
-        pthread_mutex_unlock(&c->stream_running_mtx[dpos]);
+        c->lookup_hit_mask_h[dpos]=0LU;
+        __atomic_store_n(&c->stream_running[dpos], 0, __ATOMIC_RELAXED);
 
         dpos=(dpos+1)&RTE_BV_CLASSIFIER_NUM_STREAMS_MASK;
     }

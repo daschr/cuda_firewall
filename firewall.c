@@ -37,7 +37,6 @@ extern "C" {
 #include "config.h"
 #include "misc.h"
 
-#define DEFAULT_NB_QUEUES 1
 #define RTE_LOGTYPE_APP RTE_LOGTYPE_USER1
 
 struct rte_pktmbuf_extmem ext_mem;
@@ -51,6 +50,11 @@ volatile uint8_t running;
 typedef struct {
     struct rte_ether_addr *tap_macaddr;
 } callback_payload_t;
+
+typedef struct {
+    struct rte_bv_classifier *classifier;
+    struct rte_ether_addr *tap_macaddr;
+} trunk_tx_param_t;
 
 void exit_handler(int e) {
     running=0;
@@ -73,8 +77,6 @@ void tx_callback(struct rte_mbuf **pkts, uint64_t pkts_mask, uint64_t lookup_hit
     uint16_t i=0, j=0;
     struct rte_mbuf *bufs_tx[BURST_SIZE];
 
-    printf("[tx_callback] nb_rx: %hu lookup_hit_mask: %08lX\n", nb_rx, lookup_hit_mask);
-
     for(; i<nb_rx; ++i) {
         if(unlikely(!((lookup_hit_mask>>i)&1))) {
             bufs_tx[j++]=pkts[i];
@@ -83,20 +85,17 @@ void tx_callback(struct rte_mbuf **pkts, uint64_t pkts_mask, uint64_t lookup_hit
             continue;
         }
 
-        if(unlikely(*(actions[i])==RULE_DROP))
+        if(unlikely(*(actions[i])==RULE_DROP)) {
+            rte_pktmbuf_free(pkts[i]);
             continue;
+        }
 
         bufs_tx[j++]=pkts[i];
         if(p->tap_macaddr)
             rte_memcpy(&(rte_pktmbuf_mtod(pkts[i], struct rte_ether_hdr *)->dst_addr), p->tap_macaddr, 6);
     }
 
-    const uint16_t nb_tx = rte_eth_tx_burst(tap_port_id, 0, bufs_tx, j);
-
-    if(unlikely(nb_tx<nb_rx)) {
-        for(uint16_t b=nb_tx; b<nb_rx; ++b)
-            rte_pktmbuf_free(pkts[b]);
-    }
+    rte_eth_tx_burst(tap_port_id, 0, bufs_tx, j);
 }
 
 int trunk_rx(void *arg) {
@@ -111,20 +110,22 @@ int trunk_rx(void *arg) {
         if(unlikely(nb_rx==0))
             continue;
 
-        pkts_mask=(1<<nb_rx)-1;
+        pkts_mask=nb_rx<BURST_SIZE?(1LU<<nb_rx)-1LU:0xffffffff;
 
-        printf("[trunk_rx] pkts_mask: %08lX\n", pkts_mask);
         rte_bv_classifier_enqueue_burst(c, bufs_rx, pkts_mask);
     }
 
+    printf("[trunk_rx] stopped\n");
     return 0;
 }
 
-static __rte_noreturn void trunk_tx(struct rte_bv_classifier *c, struct rte_ether_addr *tap_macaddr) {
+static int trunk_tx(void *p_r) {
+    trunk_tx_param_t *p=(trunk_tx_param_t *) p_r;
     printf("[trunk_tx] launched\n");
-    callback_payload_t payload= { .tap_macaddr=tap_macaddr};
+    callback_payload_t payload= { .tap_macaddr=p->tap_macaddr};
 
-    rte_bv_classifier_poll_lookups(c, tx_callback, (void *) &payload);
+    rte_bv_classifier_poll_lookups(p->classifier, tx_callback, (void *) &payload);
+    return 0;
 }
 
 static int tap_tx(__rte_unused void *arg) {
@@ -139,14 +140,13 @@ static int tap_tx(__rte_unused void *arg) {
 
         const uint16_t nb_tx = rte_eth_tx_burst(trunk_port_id, 0, bufs_rx, nb_rx);
 
-        printf("[tap_tx] nb_tx: %hu\n", nb_tx);
-
         if(unlikely(nb_tx<nb_rx)) {
             for(uint16_t b=nb_tx; b<nb_rx; ++b)
                 rte_pktmbuf_free(bufs_rx[b]);
         }
     }
 
+    printf("[tap_tx] stopped\n");
     return 0;
 }
 
@@ -275,13 +275,14 @@ int main(int ac, char *as[]) {
 
     free_ruleset_except_actions(&ruleset);
 
+    trunk_tx_param_t trunk_tx_param= {.classifier=classifier, .tap_macaddr=&tap_macaddr};
     uint16_t coreid=rte_get_next_lcore(rte_get_main_lcore(), 1, 1);
     rte_eal_remote_launch(tap_tx, NULL, coreid);
 
     coreid=rte_get_next_lcore(coreid, 1, 1);
-    rte_eal_remote_launch(trunk_rx, (void *) classifier, 2);
+    rte_eal_remote_launch(trunk_rx, (void *) classifier, coreid);
 
-    trunk_tx(classifier, &tap_macaddr);
+    trunk_tx(&trunk_tx_param);
 
     rte_eal_mp_wait_lcore();
 
