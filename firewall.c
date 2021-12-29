@@ -108,45 +108,49 @@ static int firewall(void *arg) {
     stats_t *stats=((stats_t *) conf->stats)+((rte_lcore_id()&1)^1);
 
     if(rte_lcore_id()&1) {
-        volatile uint64_t *lookup_hit_mask, *lookup_hit_mask_d;
-        uint64_t pkts_mask;
-        volatile uint32_t *positions, *positions_d;
+        uint64_t lookup_hit_mask=0, pkts_mask;
+        volatile uint8_t **actions, **actions_d;
 
-        cudaHostAlloc((void **) &positions, sizeof(uint32_t)*BURST_SIZE, cudaHostAllocMapped);
-        cudaHostGetDevicePointer((void **) &positions_d, (uint32_t *) positions, 0);
-
-        cudaHostAlloc((void **) &lookup_hit_mask, sizeof(uint64_t), cudaHostAllocMapped);
-        cudaHostGetDevicePointer((void **) &lookup_hit_mask_d, (uint64_t *) lookup_hit_mask, 0);
+        cudaHostAlloc((void **) &actions, sizeof(uint8_t *)*BURST_SIZE, cudaHostAllocMapped);
+        cudaHostGetDevicePointer((void **) &actions_d, (uint8_t **) actions, 0);
 
         struct rte_mbuf **bufs_rx;
         struct rte_mbuf **bufs_rx_d;
         cudaHostAlloc((void **) &bufs_rx, sizeof(struct rte_mbuf*)*BURST_SIZE, cudaHostAllocMapped);
         cudaHostGetDevicePointer((void **) &bufs_rx_d, bufs_rx, 0);
 
-        struct rte_mbuf *bufs_tx[BURST_SIZE];
-
         const int (*lookup) (void *, struct rte_mbuf **, uint64_t, uint64_t *, void **)=rte_table_bv_ops.f_lookup;
+
+        struct rte_mbuf *bufs_tx[BURST_SIZE];
 
         int16_t i,j;
 
-        *lookup_hit_mask=0;
-        for(; likely(running); *lookup_hit_mask=0) {
+        for(; likely(running); lookup_hit_mask=0) {
             const uint16_t nb_rx = rte_eth_rx_burst(trunk_port_id, queue_id, bufs_rx, BURST_SIZE);
 
             if(unlikely(nb_rx==0))
                 continue;
 
+            pkts_mask=nb_rx==64?UINT64_MAX:((1LU<<nb_rx)-1);
 
-            pkts_mask=nb_rx==64?(UINT64_MAX):((1LU<<nb_rx)-1);
-
-            lookup(conf->table, bufs_rx_d, pkts_mask, (uint64_t *) lookup_hit_mask_d, (void **) positions_d);
+            lookup(conf->table, bufs_rx_d, pkts_mask, &lookup_hit_mask, (void **) actions_d);
 
             i=0;
             j=0;
 
             for(; i<nb_rx; ++i) {
-                if(unlikely(((*lookup_hit_mask>>i)&1)&&(conf->actions[positions[i]]==RULE_DROP)))
+                if(unlikely(!((lookup_hit_mask>>i)&1))) {
+                    bufs_tx[j++]=bufs_rx[i];
+                    if(conf->tap_macaddr!=NULL)
+                        rte_memcpy(&(rte_pktmbuf_mtod(bufs_rx[i], struct rte_ether_hdr *)->dst_addr), conf->tap_macaddr, 6);
+
                     continue;
+                }
+
+                if(unlikely(*(actions[i])==RULE_DROP)) {
+                    rte_pktmbuf_free(bufs_rx[i]);
+                    continue;
+                }
 
                 bufs_tx[j++]=bufs_rx[i];
                 if(conf->tap_macaddr!=NULL)
@@ -159,11 +163,6 @@ static int firewall(void *arg) {
             stats->pkts_out+=nb_tx;
             stats->pkts_accepted+=j;
             stats->pkts_dropped+=nb_rx-j;
-
-            if(unlikely(nb_tx<nb_rx)) {
-                for(uint16_t b=nb_tx; b<nb_rx; ++b)
-                    rte_pktmbuf_free(bufs_rx[b]);
-            }
         }
     } else {
         struct rte_mbuf *bufs_rx[BURST_SIZE];
@@ -186,6 +185,7 @@ static int firewall(void *arg) {
         }
     }
 
+    printf("%d stopped\n", rte_lcore_id());
     return 0;
 }
 
@@ -306,14 +306,21 @@ int main(int ac, char *as[]) {
         fdefs[i].size=fdefs_sizes[i];
     }
 
-    struct rte_table_bv_params table_params = { .num_fields=5, .field_defs=fdefs };
+    struct rte_table_bv_params table_params = { .num_fields=5, .field_defs=fdefs, .num_rules=ruleset.num_rules };
 
-    table=rte_table_bv_ops.f_create(&table_params, rte_socket_id(), 0);
+    table=rte_table_bv_ops.f_create(&table_params, rte_socket_id(), 1);
 
     if(table==NULL)
         goto err;
 
-    rte_table_bv_ops.f_add_bulk(table, (void **) ruleset.rules, NULL, ruleset.num_rules, NULL, NULL);
+    uint8_t **actions=rte_malloc("actions", ruleset.num_rules*sizeof(uint8_t *), sizeof(uint8_t *));
+    for(uint32_t i=0; i<ruleset.num_rules; ++i)
+        actions[i]=&ruleset.actions[i];
+
+    if(rte_table_bv_ops.f_add_bulk(table, (void **) ruleset.rules, (void **) actions, ruleset.num_rules, NULL, NULL))
+        goto err;
+
+    rte_free(actions);
 
     free_ruleset_except_actions(&ruleset);
 
@@ -322,7 +329,7 @@ int main(int ac, char *as[]) {
     printf("done starting kernel\n");
 
     fw_conf=(firewall_conf_t) {
-        .table=table, .actions=ruleset.actions, .tap_macaddr=NULL, .stats=port_stats
+        .table=table, .actions=ruleset.actions, .tap_macaddr=&tap_macaddr, .stats=port_stats
     };
 
     uint16_t coreid=rte_get_next_lcore(rte_get_main_lcore(), 1, 1);
