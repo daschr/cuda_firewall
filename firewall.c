@@ -127,8 +127,7 @@ static int firewall(void *arg) {
 
         int16_t i,j;
 
-        *lookup_hit_mask=0;
-        for(; likely(running); *lookup_hit_mask=0) {
+        while(likely(running)) {
             const uint16_t nb_rx = rte_eth_rx_burst(trunk_port_id, queue_id, bufs_rx, BURST_SIZE);
 
             if(unlikely(nb_rx==0))
