@@ -32,9 +32,9 @@ struct rte_table_bv {
     uint32_t entry_size;
     uint8_t *entries;
 
-    uint32_t **ranges_from; // size==[num_fields][2*RTE_TABLE_BV_MAX_RANGES]
-    uint32_t **ranges_to; // size==[num_fields][2*RTE_TABLE_BV_MAX_RANGES]
-    uint32_t **bvs; // size==[num_fields][RTE_TABLE_BV_BS*2*RTE_TABLE_BV_MAX_RANGES]
+    uint32_t **ranges_from;
+    uint32_t **ranges_to;
+    uint32_t **bvs;
 
     size_t *num_ranges;
     uint32_t *field_offsets;
@@ -93,7 +93,6 @@ static int rte_table_bv_free(void *t_r) {
     return 0;
 }
 
-#define IS_ERROR(X) is_error(X, __FILE__, __LINE__)
 
 static void *rte_table_bv_create(void *params, int socket_id, uint32_t entry_size) {
     struct rte_table_bv_params *p=(struct rte_table_bv_params *) params;
@@ -109,6 +108,7 @@ static void *rte_table_bv_create(void *params, int socket_id, uint32_t entry_siz
     t->ranges_to=(uint32_t **) rte_malloc("ranges_to", sizeof(uint32_t *)*t->num_fields, 0);
     t->bvs=(uint32_t **) rte_malloc("bvs_db", sizeof(uint32_t *)*t->num_fields, 0);
 
+#define IS_ERROR(X) is_error(X, __FILE__, __LINE__)
 #define CHECK(X) if(IS_ERROR(X)) return NULL
 
     CHECK(cudaHostAlloc((void **) &t->pkts_data_h, sizeof(uint8_t*)*RTE_TABLE_BV_MAX_PKTS, cudaHostAllocMapped|cudaHostAllocWriteCombined));
@@ -139,7 +139,9 @@ static void *rte_table_bv_create(void *params, int socket_id, uint32_t entry_siz
     CHECK(cudaMemcpy(t->ranges_to_dev, t->ranges_to, sizeof(uint32_t *)*t->num_fields, cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(t->bvs_dev, t->bvs, sizeof(uint32_t *)*t->num_fields, cudaMemcpyHostToDevice));
     CHECK(cudaDeviceSetCacheConfig(cudaFuncCachePreferL1));
+
 #undef CHECK
+#undef IS_ERROR
 
     t->bv_markers=(rte_bv_markers_t *) rte_malloc("bv_markers", sizeof(rte_bv_markers_t)*t->num_fields, 0);
 
@@ -274,7 +276,6 @@ static int rte_table_bv_entry_add_bulk(void *t_r, void **ks_r, void **es_r, uint
 
         if(e_ptr)
             e_ptr[k]=&t->entries[t->entry_size*ks[k]->pos];
-
     }
 
     return 0;
@@ -311,10 +312,13 @@ static int rte_table_bv_entry_delete_bulk(void  *t_r, void **ks_r, uint32_t n_ke
     return 0;
 }
 
-__global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from, uint32_t *__restrict__ *__restrict__ ranges_to,
-                            const uint64_t *__restrict__ num_ranges, const uint32_t *__restrict__ offsets,  uint8_t *__restrict__ sizes,
+__global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
+                            uint32_t *__restrict__ *__restrict__ ranges_to,
+                            const uint64_t *__restrict__ num_ranges,
+                            const uint32_t *__restrict__ offsets,  uint8_t *__restrict__ sizes,
                             uint32_t *__restrict__ *__restrict__ bvs, const uint32_t bv_bs,
-                            const uint32_t num_fields, const uint32_t entry_size, const uint8_t *__restrict__ entries,
+                            const uint32_t num_fields,
+                            const uint32_t entry_size, const uint8_t *__restrict__ entries,
                             const ulong pkts_mask, uint8_t *__restrict__ *__restrict__ pkts,
                             void *__restrict__ *matched_entries, ulong *__restrict__ lookup_hit_mask) {
 
