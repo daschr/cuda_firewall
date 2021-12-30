@@ -9,10 +9,13 @@ extern "C" {
 #include <rte_log.h>
 #include <rte_malloc.h>
 #include <stdlib.h>
-
+/*
 #define NUM_BLOCKS 2
 #define WORKERS_PER_PACKET 32
 #define PACKETS_PER_BLOCK 32
+*/
+#define NUM_BLOCKS 64
+#define WORKERS_PER_FIELD 32
 
 #ifdef RTE_TABLE_STATS_COLLECT
 #define RTE_TABLE_BV_STATS_PKTS_IN_ADD(table, val) table->stats.n_pkts_in += val
@@ -47,6 +50,9 @@ struct rte_table_bv {
     uint8_t **pkts_data;
     uint8_t **pkts_data_h;
 
+    uint8_t *lookup_hit_vec;
+    uint8_t *lookup_hit_vec_h;
+
     rte_bv_markers_t *bv_markers; // size==num_fields
 };
 
@@ -77,6 +83,7 @@ static int rte_table_bv_free(void *t_r) {
     cudaFree(t->field_offsets);
     cudaFree(t->field_sizes);
 
+    cudaFreeHost(t->lookup_hit_vec_h);
     cudaFreeHost(t->entries);
     cudaFreeHost(t->pkts_data_h);
 
@@ -115,6 +122,9 @@ static void *rte_table_bv_create(void *params, int socket_id, uint32_t entry_siz
     CHECK(cudaHostGetDevicePointer((void **) &t->pkts_data, t->pkts_data_h, 0));
 
     CHECK(cudaHostAlloc((void **) &t->entries, t->entry_size*t->num_rules, cudaHostAllocMapped));
+
+    CHECK(cudaHostAlloc((void **) &t->lookup_hit_vec_h, sizeof(uint8_t*)*RTE_TABLE_BV_MAX_PKTS, cudaHostAllocMapped));
+    CHECK(cudaHostGetDevicePointer((void **) &t->lookup_hit_vec, t->lookup_hit_vec_h, 0));
 
     CHECK(cudaMalloc((void **) &t->ranges_from_dev, sizeof(uint32_t *)*t->num_fields));
     CHECK(cudaMalloc((void **) &t->ranges_to_dev, sizeof(uint32_t *)*t->num_fields));
@@ -315,84 +325,90 @@ static int rte_table_bv_entry_delete_bulk(void  *t_r, void **ks_r, uint32_t n_ke
 __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
                             uint32_t *__restrict__ *__restrict__ ranges_to,
                             const uint64_t *__restrict__ num_ranges,
-                            const uint32_t *__restrict__ offsets,  const uint8_t *__restrict__ sizes,
+                            const uint32_t *__restrict__ offsets, uint8_t *__restrict__ sizes,
                             uint32_t *__restrict__ *__restrict__ bvs, const uint32_t bv_bs,
                             const uint32_t num_fields,
                             const uint32_t entry_size, const uint8_t *__restrict__ entries,
                             const ulong pkts_mask, uint8_t *__restrict__ *__restrict__ pkts,
-                            void *__restrict__ *matched_entries, ulong *__restrict__ lookup_hit_mask) {
+                            void *__restrict__ *matched_entries, uint8_t *__restrict__ lookup_hit_vec) {
 
-    __shared__ uint *bv[RTE_TABLE_BV_MAX_PKTS][RTE_TABLE_BV_MAX_FIELDS];
-    __shared__ uint64_t c_lookup_hit_mask;
+#define pkt_id blockIdx.x
+#define field_id threadIdx.y
 
-    if(!(threadIdx.x|threadIdx.y|threadIdx.z)) {
-        c_lookup_hit_mask=0;
-        __threadfence_block();
-    }
+    __shared__ uint *bv[RTE_TABLE_BV_MAX_FIELDS];
+    __shared__ uint8_t bv_not_found;
 
-    const int pkt_id=(blockDim.y*blockIdx.x+threadIdx.y);
     if(!((pkts_mask>>pkt_id)&1))
         return;
 
-    for(int field_id=0; field_id<num_fields; ++field_id) {
-        uint v;
-        if(!threadIdx.x) {
-            bv[pkt_id][field_id]=NULL;
-            const uint8_t *pkt=(uint8_t * ) pkts[pkt_id]+offsets[field_id];
-            switch(sizes[field_id]) {
-            case 1:
-                v=*pkt;
-                break;
-            case 2:
-                v=pkt[1]|(pkt[0]<<8);
-                break;
-            case 4:
-                v=pkt[3]|(pkt[2]<<8)|(pkt[1]<<16)|(pkt[0]<<24);
-                break;
-            default:
-                printf("[%d|%d] unknown size: %u byte\n", blockIdx.x, threadIdx.y, sizes[field_id]);
-                break;
-            }
+
+    uint v;
+    if(!threadIdx.x) {
+        bv_not_found=0;
+        bv[field_id]=NULL;
+        const uint8_t *pkt=(uint8_t * ) pkts[pkt_id]+offsets[field_id];
+        switch(sizes[field_id]) {
+        case 1:
+            v=*pkt;
+            break;
+        case 2:
+            v=pkt[1]|(pkt[0]<<8);
+            break;
+        case 4:
+            v=pkt[3]|(pkt[2]<<8)|(pkt[1]<<16)|(pkt[0]<<24);
+            break;
+        default:
+            printf("[%d|%d] unknown size: %u byte\n", blockIdx.x, threadIdx.y, sizes[field_id]);
+            break;
         }
-        v=__shfl_sync(UINT32_MAX, v, 0);
+    }
+    v=__shfl_sync(UINT32_MAX, v, 0);
 
 
-        long size=num_ranges[field_id]>>5;
-        long start=0, offset;
-        uint32_t l,r; //left, right
-        __syncwarp();
+    long size=num_ranges[field_id]>>5;
+    long start=0, offset;
+    uint32_t l,r; //left, right
+    __syncwarp();
 
-        while(size) {
-            offset=start+((long) threadIdx.x)*size;
-            l=__ballot_sync(UINT32_MAX, v>=ranges_from[field_id][offset]);
-            r=__ballot_sync(UINT32_MAX, v<=ranges_to[field_id][offset]);
-            if(l&r) {
-                if((__ffs(l&r)-1)==threadIdx.x)
-                    bv[pkt_id][field_id]=bvs[field_id]+offset*RTE_TABLE_BV_BS;
-                goto found_bv;
-            }
-            if(!l)
-                goto found_bv;
-
-            //reuse r to save one register per thread
-            r=__popc(l)-1;
-            start=__shfl_sync(UINT32_MAX, offset+1, r);
-            size=r==31?(num_ranges[field_id]-start)>>5:(size-1)>>5;
-
-            __syncwarp();
-        }
-        offset=start+threadIdx.x;
-        l=__ballot_sync(UINT32_MAX, offset<num_ranges[field_id]?v>=ranges_from[field_id][offset]:0);
-        r=__ballot_sync(UINT32_MAX, offset<num_ranges[field_id]?v<=ranges_to[field_id][offset]:0);
+    while(size) {
+        offset=start+((long) threadIdx.x)*size;
+        l=__ballot_sync(UINT32_MAX, v>=ranges_from[field_id][offset]);
+        r=__ballot_sync(UINT32_MAX, v<=ranges_to[field_id][offset]);
         if(l&r) {
             if((__ffs(l&r)-1)==threadIdx.x)
-                bv[pkt_id][field_id]=bvs[field_id]+offset*RTE_TABLE_BV_BS;
+                bv[field_id]=bvs[field_id]+offset*RTE_TABLE_BV_BS;
+            goto found_bv;
         }
+        if(!l)
+            goto found_bv;
 
-found_bv:
-        if(!bv[pkt_id][field_id])
-            goto end;
+        //reuse r to save one register per thread
+        r=__popc(l)-1;
+        start=__shfl_sync(UINT32_MAX, offset+1, r);
+        size=r==31?(num_ranges[field_id]-start)>>5:(size-1)>>5;
+
+        __syncwarp();
     }
+    offset=start+threadIdx.x;
+    l=__ballot_sync(UINT32_MAX, offset<num_ranges[field_id]?v>=ranges_from[field_id][offset]:0);
+    r=__ballot_sync(UINT32_MAX, offset<num_ranges[field_id]?v<=ranges_to[field_id][offset]:0);
+    if(l&r) {
+        if((__ffs(l&r)-1)==threadIdx.x)
+            bv[field_id]=bvs[field_id]+offset*RTE_TABLE_BV_BS;
+    }
+found_bv:
+    if((!threadIdx.x) & !bv[field_id])
+        bv_not_found=1;
+
+    __syncthreads();
+
+    if(bv_not_found)
+        return;
+
+    if(threadIdx.y)
+        return;
+
+#undef field_id
     {
         __syncwarp();
         // all bitvectors found, now getting highest-priority rule
@@ -400,29 +416,26 @@ found_bv:
         for(int bv_block=threadIdx.x; bv_block<bv_bs; bv_block+=blockDim.x) { // TODO maybe use WORKERS_PER_PACKET
             x=UINT32_MAX;
             for(int field_id=0; field_id<num_fields; ++field_id)
-                x&=bv[pkt_id][field_id][bv_block];
+                x&=bv[field_id][bv_block];
 
             __syncwarp(__activemask()); //TODO maybe remove
             if((tm=__ballot_sync(__activemask(), __ffs(x)))) {
                 if((__ffs(tm)-1)==threadIdx.x) {
                     matched_entries[pkt_id]=(void *) &entries[entry_size*((bv_block<<5)+__ffs(x)-1)];
                     //positions[pkt_id]=(bv_block<<5)+__ffs(x)-1;
-                    atomicOr((unsigned long long int *)&c_lookup_hit_mask, 1LU<<pkt_id);
+                    lookup_hit_vec[pkt_id]=1;
+                    //atomicOr((unsigned long long int *)lookup_hit_mask, 1LU<<pkt_id);
+                    __threadfence_system();
                 }
                 break;
             }
         }
     }
-end:
 
-    __syncthreads();
-
-    if(!(threadIdx.x|threadIdx.y|threadIdx.z)) {
-        atomicOr((unsigned long long int *) lookup_hit_mask, c_lookup_hit_mask);
-        __threadfence_system();
-    }
+#undef pkt_id
 }
 
+#define IS_ERROR(X) is_error(X, __FILE__, __LINE__)
 int rte_table_bv_lookup_stream(void *t_r, cudaStream_t stream, struct rte_mbuf **pkts, uint64_t pkts_mask,
                                uint64_t *lookup_hit_mask, void **e) {
 
@@ -440,14 +453,21 @@ int rte_table_bv_lookup_stream(void *t_r, cudaStream_t stream, struct rte_mbuf *
         }
     }
 
-    *lookup_hit_mask=0;
-    bv_search<<<NUM_BLOCKS, dim3{WORKERS_PER_PACKET, PACKETS_PER_BLOCK}, 0, stream>>>(	t->ranges_from_dev, t->ranges_to_dev, t->num_ranges,
+    bv_search<<<NUM_BLOCKS, dim3{WORKERS_PER_FIELD, t->num_fields}, 0, stream>>>(	t->ranges_from_dev, t->ranges_to_dev, t->num_ranges,
             t->field_offsets, t->field_sizes,
             t->bvs_dev, RTE_TABLE_BV_BS, t->num_fields, t->entry_size, t->entries,
             real_pkts_mask, t->pkts_data,
-            e, lookup_hit_mask);
+            e, t->lookup_hit_vec);
 
     cudaStreamSynchronize(stream);
+    uint64_t lhm=0;
+    for(uint32_t i=0; i<n_pkts_in; ++i) {
+        if(t->lookup_hit_vec_h[i]) {
+            lhm|=1LU<<i;
+            t->lookup_hit_vec_h[i]=0;
+        }
+    }
+    *lookup_hit_mask=lhm;
 
     RTE_TABLE_BV_STATS_PKTS_LOOKUP_MISS(t, n_pkts_in-__builtin_popcountll(*lookup_hit_mask));
     return 0;
@@ -468,14 +488,23 @@ static int rte_table_bv_lookup(void *t_r, struct rte_mbuf **pkts, uint64_t pkts_
         }
     }
 
-    *lookup_hit_mask=0;
-    bv_search<<<NUM_BLOCKS, dim3{WORKERS_PER_PACKET, PACKETS_PER_BLOCK}>>>(	t->ranges_from_dev, t->ranges_to_dev, t->num_ranges,
+    bv_search<<<NUM_BLOCKS, dim3{WORKERS_PER_FIELD, t->num_fields}>>>(	t->ranges_from_dev, t->ranges_to_dev, t->num_ranges,
             t->field_offsets, t->field_sizes,
             t->bvs_dev, RTE_TABLE_BV_BS, t->num_fields, t->entry_size, t->entries,
             real_pkts_mask, t->pkts_data,
-            e, lookup_hit_mask);
+            e, t->lookup_hit_vec);
 
     cudaStreamSynchronize(0);
+
+    uint64_t lhm=0;
+    for(uint32_t i=0; i<n_pkts_in; ++i) {
+        if(t->lookup_hit_vec_h[i]) {
+            lhm|=1LU<<i;
+            t->lookup_hit_vec_h[i]=0;
+        }
+    }
+    *lookup_hit_mask=lhm;
+
 
     RTE_TABLE_BV_STATS_PKTS_LOOKUP_MISS(t, n_pkts_in-__builtin_popcountll(*lookup_hit_mask));
 

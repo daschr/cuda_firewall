@@ -106,14 +106,11 @@ static int firewall(void *arg) {
     stats_t *stats=((stats_t *) conf->stats)+((rte_lcore_id()&1)^1);
 
     if(rte_lcore_id()&1) {
-        volatile uint64_t *lookup_hit_mask, *lookup_hit_mask_d, pkts_mask;
+        volatile uint64_t lookup_hit_mask, pkts_mask;
         volatile uint8_t **actions, **actions_d;
 
         cudaHostAlloc((void **) &actions, sizeof(uint8_t *)*BURST_SIZE, cudaHostAllocMapped);
         cudaHostGetDevicePointer((void **) &actions_d, (uint8_t **) actions, 0);
-
-        cudaHostAlloc((void **) &lookup_hit_mask, sizeof(uint64_t), cudaHostAllocMapped);
-        cudaHostGetDevicePointer((void **) &lookup_hit_mask_d, (uint64_t *) lookup_hit_mask, 0);
 
         struct rte_mbuf **bufs_rx;
         struct rte_mbuf **bufs_rx_d;
@@ -135,20 +132,20 @@ static int firewall(void *arg) {
 
             pkts_mask=nb_rx==64?UINT64_MAX:((1LU<<nb_rx)-1);
 
-            rte_table_bv_lookup_stream(conf->table, stream, bufs_rx_d, pkts_mask, (uint64_t *) lookup_hit_mask_d, (void **) actions_d);
+            rte_table_bv_lookup_stream(conf->table, stream, bufs_rx_d, pkts_mask, (uint64_t *) &lookup_hit_mask, (void **) actions_d);
 
             i=0;
             j=0;
 
             for(; i<nb_rx; ++i) {
-                if(unlikely(!((*lookup_hit_mask>>i)&1))) {
+                if(unlikely(!((lookup_hit_mask>>i)&1))) {
                     bufs_tx[j++]=bufs_rx[i];
                     if(conf->tap_macaddr!=NULL)
                         rte_memcpy(&(rte_pktmbuf_mtod(bufs_rx[i], struct rte_ether_hdr *)->dst_addr), conf->tap_macaddr, 6);
 
                     continue;
                 }
-
+	
                 if(unlikely(*(actions[i])==RULE_DROP)) {
                     rte_pktmbuf_free(bufs_rx[i]);
                     continue;
