@@ -315,7 +315,7 @@ static int rte_table_bv_entry_delete_bulk(void  *t_r, void **ks_r, uint32_t n_ke
 __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
                             uint32_t *__restrict__ *__restrict__ ranges_to,
                             const uint64_t *__restrict__ num_ranges,
-                            const uint32_t *__restrict__ offsets,  uint8_t *__restrict__ sizes,
+                            const uint32_t *__restrict__ offsets,  const uint8_t *__restrict__ sizes,
                             uint32_t *__restrict__ *__restrict__ bvs, const uint32_t bv_bs,
                             const uint32_t num_fields,
                             const uint32_t entry_size, const uint8_t *__restrict__ entries,
