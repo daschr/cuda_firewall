@@ -106,8 +106,8 @@ static int firewall(void *arg) {
     stats_t *stats=((stats_t *) conf->stats)+((rte_lcore_id()&1)^1);
 
     if(rte_lcore_id()&1) {
-        volatile uint64_t lookup_hit_mask, pkts_mask;
-        volatile uint8_t **actions, **actions_d;
+        uint64_t lookup_hit_mask, pkts_mask;
+        uint8_t **actions, **actions_d;
 
         cudaHostAlloc((void **) &actions, sizeof(uint8_t *)*BURST_SIZE, cudaHostAllocMapped);
         cudaHostGetDevicePointer((void **) &actions_d, (uint8_t **) actions, 0);
@@ -145,7 +145,7 @@ static int firewall(void *arg) {
 
                     continue;
                 }
-	
+
                 if(unlikely(*(actions[i])==RULE_DROP)) {
                     rte_pktmbuf_free(bufs_rx[i]);
                     continue;
