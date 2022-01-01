@@ -138,44 +138,56 @@ void rte_bv_markers_free(rte_bv_markers_t *markers) {
     rte_hash_free(markers->table);
 }
 
-inline void bv_set(uint32_t *bv, uint32_t pos) {
-    bv[pos>>5]|=1<<(pos&31);
+typedef struct {
+    size_t bv_size;
+    size_t non_zero_bv_size;
+    uint32_t *bv;
+    uint32_t *non_zero_bv;
+} bv_t;
+
+inline void bv_set(bv_t *bv, uint32_t pos) {
+    bv->bv[pos>>5]|=1<<(pos&31);
+    bv->non_zero_bv[pos>>10]|=1<<((pos>>5)&31);
 }
 
-inline void bv_unset(uint32_t *bv, uint32_t pos) {
-    bv[pos>>5]&=~(1<<(pos&31));
+inline void bv_unset(bv_t *bv, uint32_t pos) {
+    bv->bv[pos>>5]&=~(1<<(pos&31));
+    if(!bv->bv[pos>>5])
+        bv->non_zero_bv[pos>>10]&=~(1<<((pos>>5)&31));
 }
 
-inline void bv_set_list(uint32_t *bv, size_t num_markers, const rte_bv_marker_t *list) {
+inline void bv_set_list(bv_t *bv, size_t num_markers, const rte_bv_marker_t *list) {
     for(size_t i=0; i<num_markers; ++i) {
         if(list[i].valid)
             bv_set(bv, list[i].value);
     }
 }
 
-inline void bv_unset_list(uint32_t *bv, size_t num_markers, const rte_bv_marker_t *list) {
+inline void bv_unset_list(bv_t *bv, size_t num_markers, const rte_bv_marker_t *list) {
     for(size_t i=0; i<num_markers; ++i) {
         if(list[i].valid)
             bv_unset(bv, list[i].value);
     }
 }
 
-uint8_t rte_bv_add_range_host(rte_bv_ranges_t *ranges, uint32_t from, uint32_t to, size_t bv_size, const uint32_t *bv) {
+uint8_t rte_bv_add_range_host(rte_bv_ranges_t *ranges, uint32_t from, uint32_t to, const bv_t *bv) {
     if(ranges->num_ranges>=ranges->max_num_ranges)
         return 1;
     ranges->ranges_from[ranges->num_ranges]=from;
     ranges->ranges_to[ranges->num_ranges]=to;
-    memcpy(ranges->bvs+(ranges->num_ranges*ranges->bv_bs), bv, sizeof(uint32_t)*bv_size);
+    memcpy(ranges->bvs+(ranges->num_ranges*ranges->bv_bs), bv->bv, sizeof(uint32_t)*bv->bv_size);
+    memcpy(ranges->non_zero_bvs+(ranges->num_ranges*((ranges->bv_bs>>5)+1)), bv->non_zero_bv, sizeof(uint32_t)*bv->non_zero_bv_size);
     ++ranges->num_ranges;
     return 0;
 }
 
-uint8_t rte_bv_add_range_gpu(rte_bv_ranges_t *ranges, uint32_t from, uint32_t to, size_t bv_size, const uint32_t *bv) {
+uint8_t rte_bv_add_range_gpu(rte_bv_ranges_t *ranges, uint32_t from, uint32_t to, const bv_t *bv) {
     if(ranges->num_ranges>=ranges->max_num_ranges)
         return 1;
     CHECK(cudaMemcpy(ranges->ranges_from+ranges->num_ranges, &from, sizeof(uint32_t), cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(ranges->ranges_to+ranges->num_ranges, &to, sizeof(uint32_t), cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpy(ranges->bvs+(ranges->num_ranges*((size_t) ranges->bv_bs)), bv, sizeof(uint32_t)*bv_size, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(ranges->bvs+(ranges->num_ranges*((size_t) ranges->bv_bs)), bv->bv, sizeof(uint32_t)*bv->bv_size, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(ranges->non_zero_bvs+(ranges->num_ranges*((size_t) ((ranges->bv_bs>>5)+1))), bv->non_zero_bv, sizeof(uint32_t)*bv->non_zero_bv_size, cudaMemcpyHostToDevice));
     ++ranges->num_ranges;
     return 0;
 }
@@ -192,11 +204,16 @@ static int sort_vp_list(const void *a_r, const void *b_r) {
 }
 
 int rte_bv_markers_to_ranges(rte_bv_markers_t *markers, const uint8_t gpu, const uint8_t cast_type, rte_bv_ranges_t *ranges) {
-    uint8_t (*add_range)(rte_bv_ranges_t *, uint32_t, uint32_t, size_t, const uint32_t *)=gpu?&rte_bv_add_range_gpu:&rte_bv_add_range_host;
+    uint8_t (*add_range)(rte_bv_ranges_t *, uint32_t, uint32_t, const bv_t *)=gpu?&rte_bv_add_range_gpu:&rte_bv_add_range_host;
 
-    const size_t bv_size=(markers->max_value>>5)+1;
-    uint32_t *bv=(uint32_t *) malloc(sizeof(uint32_t)*bv_size);
-    memset(bv, 0, sizeof(uint32_t)*bv_size);
+    bv_t bv;
+    bv.bv_size=(markers->max_value>>5)+1;
+    bv.non_zero_bv_size=(bv.bv_size>>5)+1;
+    bv.bv=malloc(sizeof(uint32_t)*bv.bv_size);
+    bv.non_zero_bv=malloc(sizeof(uint32_t)*bv.non_zero_bv_size);
+    memset(bv.bv, 0, sizeof(uint32_t)*bv.bv_size);
+    memset(bv.non_zero_bv, 0, sizeof(uint32_t)*bv.non_zero_bv_size);
+
     //create sorted array of marker lists
     vp_t *marker_lists=(vp_t *) malloc(sizeof(vp_t)*markers->num_lists);
     uint32_t n=0;
@@ -210,42 +227,43 @@ int rte_bv_markers_to_ranges(rte_bv_markers_t *markers, const uint8_t gpu, const
         cur=*marker_lists[i].v;
         if(first) {
             first=0;
-            bv_set_list(bv, marker_lists[i].l->num_markers[0], marker_lists[i].l->list[0]);
+            bv_set_list(&bv, marker_lists[i].l->num_markers[0], marker_lists[i].l->list[0]);
 
             if(marker_lists[i].l->num_valid_markers[1]) {
-                if(add_range(ranges, prev, cur, bv_size, bv)) {
+                if(add_range(ranges, prev, cur, &bv)) {
                     fprintf(stderr, "[rte_bv] error while adding range, reached limit\n");
                     return 1;
                 }
 
-                bv_unset_list(bv, marker_lists[i].l->num_markers[1], marker_lists[i].l->list[1]);
+                bv_unset_list(&bv, marker_lists[i].l->num_markers[1], marker_lists[i].l->list[1]);
             }
 
             continue;
         }
 
         if(marker_lists[i].l->num_valid_markers[0]) {
-            if(add_range(ranges, prev, cur-1, bv_size, bv)) {
+            if(add_range(ranges, prev, cur-1, &bv)) {
                 fprintf(stderr, "[rte_bv] error while adding range, reached entry limit\n");
                 return 1;
             }
 
             prev=cur;
-            bv_set_list(bv, marker_lists[i].l->num_markers[0], marker_lists[i].l->list[0]);
+            bv_set_list(&bv, marker_lists[i].l->num_markers[0], marker_lists[i].l->list[0]);
         }
 
         if(marker_lists[i].l->num_valid_markers[1]) {
-            if(add_range(ranges, prev, cur, bv_size, bv)) {
+            if(add_range(ranges, prev, cur, &bv)) {
                 fprintf(stderr, "[rte_bv] error while adding range, reached entry limit\n");
                 return 1;
             }
 
             ++cur;
-            bv_unset_list(bv, marker_lists[i].l->num_markers[1], marker_lists[i].l->list[1]);
+            bv_unset_list(&bv, marker_lists[i].l->num_markers[1], marker_lists[i].l->list[1]);
         }
     }
 
-    free(bv);
+    free(bv.bv);
+    free(bv.non_zero_bv);
     free(marker_lists);
 
     return 0;

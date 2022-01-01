@@ -13,7 +13,8 @@ extern "C" {
 #include <cuda_runtime.h>
 
 #define RTE_TABLE_BV_MAX_RANGES ((size_t) (RTE_BV_MARKERS_MAX_ENTRIES>>1))
-#define RTE_TABLE_BV_BS	((size_t) (RTE_TABLE_BV_MAX_RANGES>>5))
+#define RTE_TABLE_BV_BS	((size_t) (RTE_TABLE_BV_MAX_RANGES>>5)+1)
+#define RTE_TABLE_NON_ZERO_BV_BS ((size_t) (((RTE_TABLE_BV_MAX_RANGES>>5)+1)>>5)+1)
 #define RTE_TABLE_BV_MAX_PKTS 64
 #define RTE_TABLE_BV_MAX_FIELDS 24
 

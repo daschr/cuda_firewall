@@ -283,19 +283,19 @@ int main(int ac, char *as[]) {
     printf("parsed ruleset \"%s\" with %lu rules\n", as[0], ruleset.num_rules);
 
     struct rte_table_bv_field_def fdefs[5];
-    uint32_t fdefs_offsets[5]= {	offsetof(struct rte_ipv4_hdr, src_addr),
+    uint32_t fdefs_offsets[5]= {	offsetof(struct rte_ipv4_hdr, next_proto_id),
+                                    offsetof(struct rte_ipv4_hdr, src_addr),
                                     offsetof(struct rte_ipv4_hdr, dst_addr),
                                     sizeof(struct rte_ipv4_hdr)+offsetof(struct rte_tcp_hdr, src_port),
-                                    sizeof(struct rte_ipv4_hdr)+offsetof(struct rte_tcp_hdr, dst_port),
-                                    offsetof(struct rte_ipv4_hdr, next_proto_id)
+                                    sizeof(struct rte_ipv4_hdr)+offsetof(struct rte_tcp_hdr, dst_port)
                                },
-                               fdefs_sizes[5]= {4,4,2,2,1},
+                               fdefs_sizes[5]= {1,4,4,2,2},
     ptype_masks[5] = {
+        RTE_PTYPE_L2_ETHER|RTE_PTYPE_L3_MASK|RTE_PTYPE_L4_MASK,
         RTE_PTYPE_L2_MASK|RTE_PTYPE_L3_IPV4|RTE_PTYPE_L4_MASK,
         RTE_PTYPE_L2_MASK|RTE_PTYPE_L3_IPV4|RTE_PTYPE_L4_MASK,
         RTE_PTYPE_L2_MASK|RTE_PTYPE_L3_IPV4|RTE_PTYPE_L4_TCP|RTE_PTYPE_L4_UDP,
-        RTE_PTYPE_L2_MASK|RTE_PTYPE_L3_IPV4|RTE_PTYPE_L4_TCP|RTE_PTYPE_L4_UDP,
-        RTE_PTYPE_L2_ETHER|RTE_PTYPE_L3_MASK|RTE_PTYPE_L4_MASK
+        RTE_PTYPE_L2_MASK|RTE_PTYPE_L3_IPV4|RTE_PTYPE_L4_TCP|RTE_PTYPE_L4_UDP
     };
 
     for(size_t i=0; i<5; ++i) {
