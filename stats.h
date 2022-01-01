@@ -8,6 +8,7 @@ typedef struct {
 	size_t pkts_out;
 	size_t pkts_dropped;
 	size_t pkts_accepted;
-} stats_t __rte_cache_aligned;
+	size_t pkts_lookup_miss;
+} stats_t;
 
 #endif

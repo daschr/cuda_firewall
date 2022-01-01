@@ -88,12 +88,12 @@ void print_stats(__rte_unused int e) {
     double ts_d=(double) (new_ts-timestamp)/1000000.0;
 
 #define PPS(X, P) (((double) (port_stats[P].X-old_port_stats[P].X))/ts_d)
-    printf("[trunk] pkts_in: %.2lfpps pkts_out: %.2lfpps pkts_dropped: %.2lfpps pkts_accepted: %.2lfpps\n",
-           PPS(pkts_in, 0), PPS(pkts_out, 0), PPS(pkts_dropped, 0), PPS(pkts_accepted, 0));
+    printf("[trunk] pkts_in: %.2lfpps pkts_out: %.2lfpps pkts_dropped: %.2lfpps pkts_accepted: %.2lfpps pkts_lookup_hit_miss: %.2lfpps\n",
+           PPS(pkts_in, 0), PPS(pkts_out, 0), PPS(pkts_dropped, 0), PPS(pkts_accepted, 0), PPS(pkts_lookup_miss, 0));
     old_port_stats[0]=port_stats[0];
 
-    printf("[fw-tap] pkts_in: %.2lfpps pkts_out: %.2lfpps pkts_dropped: %.2lfpps pkts_accepted: %.2lfpps\n",
-           PPS(pkts_in, 1), PPS(pkts_out, 1), PPS(pkts_dropped, 1), PPS(pkts_accepted, 1));
+    printf("[fw-tap] pkts_in: %.2lfpps pkts_out: %.2lfpps pkts_dropped: %.2lfpps pkts_accepted: %.2lfpps pkts_lookup_miss: %.2lfpps\n",
+           PPS(pkts_in, 1), PPS(pkts_out, 1), PPS(pkts_dropped, 1), PPS(pkts_accepted, 1), PPS(pkts_lookup_miss, 1));
     old_port_stats[1]=port_stats[1];
 #undef PPS
 }
@@ -103,7 +103,7 @@ static int firewall(void *arg) {
 
     const uint16_t queue_id=rte_lcore_id()>>1;
 
-    stats_t *stats=((stats_t *) conf->stats)+((rte_lcore_id()&1)^1);
+    stats_t *stats=conf->stats+((rte_lcore_id()&1)^1);
 
     if(rte_lcore_id()&1) {
         uint64_t lookup_hit_mask, pkts_mask;
@@ -143,6 +143,7 @@ static int firewall(void *arg) {
                     if(conf->tap_macaddr!=NULL)
                         rte_memcpy(&(rte_pktmbuf_mtod(bufs_rx[i], struct rte_ether_hdr *)->dst_addr), conf->tap_macaddr, 6);
 
+                    ++(stats->pkts_lookup_miss);
                     continue;
                 }
 
