@@ -361,7 +361,7 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
     }
 
     uint v;
-    {
+    if(!threadIdx.x) {
         const uint8_t *pkt=(uint8_t * ) pkts[pkt_id]+offsets[field_id];
         switch(sizes[field_id]) {
         case 1:
@@ -374,10 +374,12 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
             v=pkt[3]|(pkt[2]<<8)|(pkt[1]<<16)|(pkt[0]<<24);
             break;
         default:
+            __builtin_unreachable();
             printf("[%d|%d] unknown size: %u byte\n", blockIdx.x, threadIdx.y, sizes[field_id]);
             break;
         }
     }
+    v=__shfl_sync(UINT32_MAX, 0, v);
 
     long size=num_ranges[field_id]>>5;
     long start=0, offset;
