@@ -9,6 +9,7 @@ extern "C" {
 #include <rte_log.h>
 #include <rte_malloc.h>
 #include <stdlib.h>
+#include <sys/time.h>
 /*
 #define NUM_BLOCKS 2
 #define WORKERS_PER_PACKET 32
@@ -361,6 +362,7 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
     }
 
     uint v;
+    long size;
     if(!threadIdx.x) {
         const uint8_t *pkt=(uint8_t * ) pkts[pkt_id]+offsets[field_id];
         switch(sizes[field_id]) {
@@ -378,10 +380,11 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
             printf("[%d|%d] unknown size: %u byte\n", blockIdx.x, threadIdx.y, sizes[field_id]);
             break;
         }
+        size=num_ranges[field_id]>>5;
     }
     v=__shfl_sync(UINT32_MAX, 0, v);
+    size=__shfl_sync(UINT32_MAX, 0, size);
 
-    long size=num_ranges[field_id]>>5;
     long start=0, offset;
     uint32_t l,r; //left, right
     __syncwarp();
@@ -413,7 +416,7 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
     r=__ballot_sync(UINT32_MAX, offset<num_ranges[field_id]?v<=ranges_to[field_id][offset]:0);
     if(l&r) {
         if((__ffs(l&r)-1)==threadIdx.x) {
-//			printf("[%d|%d] %08X <= %08X <= %08X, %ld\n", pkt_id, field_id, ranges_from[field_id][offset], v, ranges_to[field_id][offset], offset);
+            //printf("[%d|%d] %08X <= %08X <= %08X, %ld\n", pkt_id, field_id, ranges_from[field_id][offset], v, ranges_to[field_id][offset], offset);
             bv[field_id]=bvs[field_id]+offset*RTE_TABLE_BV_BS;
             non_zero_bv[field_id]=non_zero_bvs[field_id]+offset*RTE_TABLE_NON_ZERO_BV_BS;
         }
@@ -423,7 +426,6 @@ found_bv:
 
     if(!threadIdx.x && !bv[field_id]) {
         bv_not_found=1;
-        __threadfence_block();
     }
 
     __syncthreads();
@@ -461,7 +463,6 @@ found_bv:
         __syncwarp(in_loop); //TODO maybe remove
         if((tm=__ballot_sync(in_loop, __ffs(y)))) {
             if((__ffs(tm)-1)==threadIdx.x) {
-//				printf("[%d] matched: %lu\n", pkt_id, ((size_t) (nz_bv_b<<5)+(size_t) __ffs(y)-1LU));
                 matched_entries[pkt_id]=(void *) &entries[entry_size*((nz_bv_b<<5)+__ffs(y)-1LU)];
                 lookup_hit_vec[pkt_id]=1;
                 //atomicOr((unsigned long long int *)lookup_hit_mask, 1LU<<pkt_id);
@@ -474,9 +475,14 @@ found_bv:
 
 }
 
+
 #define IS_ERROR(X) is_error(X, __FILE__, __LINE__)
 int rte_table_bv_lookup_stream(void *t_r, cudaStream_t stream, struct rte_mbuf **pkts, uint64_t pkts_mask,
                                uint64_t *lookup_hit_mask, void **e) {
+#ifdef MEASURE_TIME
+    struct timeval k_t1,k_t2,l_t1,l_t2;
+    gettimeofday(&l_t1, NULL);
+#endif
 
     struct rte_table_bv *t=(struct rte_table_bv *) t_r;
 
@@ -492,6 +498,10 @@ int rte_table_bv_lookup_stream(void *t_r, cudaStream_t stream, struct rte_mbuf *
         }
     }
 
+#ifdef MEASURE_TIME
+    gettimeofday(&k_t1, NULL);
+#endif
+
     bv_search<<<NUM_BLOCKS, dim3{WORKERS_PER_FIELD, t->num_fields}, 0, stream>>>(	t->ranges_from_dev, t->ranges_to_dev, t->num_ranges,
             t->field_offsets, t->field_sizes,
             t->bvs_dev, t->non_zero_bvs_dev, (int) RTE_TABLE_BV_BS, t->num_fields, t->entry_size, t->entries,
@@ -499,6 +509,11 @@ int rte_table_bv_lookup_stream(void *t_r, cudaStream_t stream, struct rte_mbuf *
             e, t->lookup_hit_vec);
 
     cudaStreamSynchronize(stream);
+
+#ifdef MEASURE_TIME
+    gettimeofday(&k_t2, NULL);
+    printf("KERNEL took %luus\n", (k_t2.tv_sec*1000000+k_t2.tv_usec)-(k_t1.tv_sec*1000000+k_t1.tv_usec));
+#endif
     uint64_t lhm=0;
     for(uint32_t i=0; i<n_pkts_in; ++i) {
         if(t->lookup_hit_vec_h[i]) {
@@ -509,6 +524,12 @@ int rte_table_bv_lookup_stream(void *t_r, cudaStream_t stream, struct rte_mbuf *
     *lookup_hit_mask=lhm;
 
     RTE_TABLE_BV_STATS_PKTS_LOOKUP_MISS(t, n_pkts_in-__builtin_popcountll(*lookup_hit_mask));
+
+#ifdef MEASURE_TIME
+    gettimeofday(&k_t2, NULL);
+    gettimeofday(&l_t2, NULL);
+    printf("LOOKUP took %luus\n", (l_t2.tv_sec*1000000+l_t2.tv_usec)-(l_t1.tv_sec*1000000+l_t1.tv_usec));
+#endif
     return 0;
 }
 

@@ -15,5 +15,5 @@
 
 #define RTE_TABLE_VAL_DROP 1
 
-#define DEFAULT_NB_QUEUES 1
+#define DEFAULT_NB_QUEUES 2
 #endif

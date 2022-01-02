@@ -42,6 +42,7 @@ extern "C" {
 #include "stats.h"
 
 #define RTE_LOGTYPE_APP RTE_LOGTYPE_USER1
+//#define MEASURE_TIME
 
 typedef struct {
     void *table;
@@ -105,6 +106,10 @@ static int firewall(void *arg) {
 
     stats_t *stats=conf->stats+((rte_lcore_id()&1)^1);
 
+#ifdef MEASURE_TIME
+    struct timeval t1,t2;
+#endif
+
     if(rte_lcore_id()&1) {
         uint64_t lookup_hit_mask, pkts_mask;
         uint8_t **actions, **actions_d;
@@ -132,7 +137,16 @@ static int firewall(void *arg) {
 
             pkts_mask=nb_rx==64?UINT64_MAX:((1LU<<nb_rx)-1);
 
+#ifdef MEASURE_TIME
+            gettimeofday(&t1, NULL);
+#endif
+
             rte_table_bv_lookup_stream(conf->table, stream, bufs_rx_d, pkts_mask, (uint64_t *) &lookup_hit_mask, (void **) actions_d);
+
+#ifdef MEASURE_TIME
+            gettimeofday(&t2, NULL);
+            printf("LOOKUP took %luus\n", (t2.tv_sec*1000000+t2.tv_usec)-(t1.tv_sec*1000000+t1.tv_usec));
+#endif
 
             i=0;
             j=0;
