@@ -338,11 +338,11 @@ static int rte_table_bv_entry_delete_bulk(void  *t_r, void **ks_r, uint32_t n_ke
 
 __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
                             uint32_t *__restrict__ *__restrict__ ranges_to,
-                            const uint64_t *__restrict__ num_ranges,
-                            const uint32_t *__restrict__ offsets, uint8_t *__restrict__ sizes,
+                            uint64_t *__restrict__ num_ranges,
+                            const uint32_t *__restrict__ offsets, const uint8_t *__restrict__ sizes,
                             uint32_t *__restrict__ *__restrict__ bvs, uint32_t *__restrict__ *__restrict__ non_zero_bvs, const int32_t bv_bs,
                             const uint32_t num_fields,
-                            const uint32_t entry_size, const uint8_t *__restrict__ entries,
+                            const uint32_t entry_size, uint8_t *__restrict__ entries,
                             const uint64_t pkts_mask, uint8_t *__restrict__ *__restrict__ pkts,
                             void *__restrict__ *matched_entries, uint8_t *__restrict__ lookup_hit_vec) {
 
@@ -352,18 +352,16 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
     __shared__ uint *__restrict__ bv[RTE_TABLE_BV_MAX_FIELDS];
     __shared__ uint *__restrict__ non_zero_bv[RTE_TABLE_BV_MAX_FIELDS];
     __shared__ uint32_t bv_not_found;
+    __shared__ uint64_t c_num_ranges[RTE_TABLE_BV_MAX_FIELDS];
 
     if(!((pkts_mask>>pkt_id)&1LU))
         return;
 
+    uint v;
     if(!threadIdx.x) {
         bv_not_found=0;
         bv[field_id]=NULL;
-    }
-
-    uint v;
-    long size;
-    if(!threadIdx.x) {
+        c_num_ranges[field_id]=num_ranges[field_id];
         const uint8_t *pkt=(uint8_t * ) pkts[pkt_id]+offsets[field_id];
         switch(sizes[field_id]) {
         case 1:
@@ -380,14 +378,12 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
             printf("[%d|%d] unknown size: %u byte\n", blockIdx.x, threadIdx.y, sizes[field_id]);
             break;
         }
-        size=num_ranges[field_id]>>5;
     }
-    v=__shfl_sync(UINT32_MAX, 0, v);
-    size=__shfl_sync(UINT32_MAX, 0, size);
-
+    __syncwarp();
+    v=__shfl_sync(UINT32_MAX, v, 0);
+    long size=c_num_ranges[field_id]>>5;
     long start=0, offset;
     uint32_t l,r; //left, right
-    __syncwarp();
 
     while(size) {
         offset=start+((long) threadIdx.x)*size;
@@ -407,13 +403,13 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
         //reuse r to save one register per thread
         r=__popc(l)-1;
         start=__shfl_sync(UINT32_MAX, offset+1, r);
-        size=r==31?(num_ranges[field_id]-start)>>5:(size-1)>>5;
+        size=r==31?(c_num_ranges[field_id]-start)>>5:(size-1)>>5;
 
         __syncwarp();
     }
     offset=start+threadIdx.x;
-    l=__ballot_sync(UINT32_MAX, offset<num_ranges[field_id]?v>=ranges_from[field_id][offset]:0);
-    r=__ballot_sync(UINT32_MAX, offset<num_ranges[field_id]?v<=ranges_to[field_id][offset]:0);
+    l=__ballot_sync(UINT32_MAX, offset<c_num_ranges[field_id]?v>=ranges_from[field_id][offset]:0);
+    r=__ballot_sync(UINT32_MAX, offset<c_num_ranges[field_id]?v<=ranges_to[field_id][offset]:0);
     if(l&r) {
         if((__ffs(l&r)-1)==threadIdx.x) {
             //printf("[%d|%d] %08X <= %08X <= %08X, %ld\n", pkt_id, field_id, ranges_from[field_id][offset], v, ranges_to[field_id][offset], offset);
@@ -466,7 +462,7 @@ found_bv:
                 matched_entries[pkt_id]=(void *) &entries[entry_size*((nz_bv_b<<5)+__ffs(y)-1LU)];
                 lookup_hit_vec[pkt_id]=1;
                 //atomicOr((unsigned long long int *)lookup_hit_mask, 1LU<<pkt_id);
-                __threadfence_system();
+                //__threadfence_system();
             }
             break;
         }
