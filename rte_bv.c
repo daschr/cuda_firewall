@@ -82,7 +82,6 @@ int rte_bv_markers_create(rte_bv_markers_t *markers) {
         BLAME("Error allocating initial_list\n");
 
     ++c;
-    puts("created markers");
     return 0;
 }
 
@@ -267,7 +266,6 @@ uint8_t rte_bv_add_range_gpu(rte_bv_ranges_t *ranges, uint32_t from, uint32_t to
 #define GET(X, Y) CHECK(cudaMemcpy(X, Y, sizeof(uint32_t), cudaMemcpyDeviceToHost))
     switch(cast_type) {
     case 4:
-        printf("%hhu, %lu: ADD %08X:%08X now: %08X <-> %08X\n", cast_type, ranges->num_ranges, from, to, from, to);
         SET(ranges->ranges_from+ranges->num_ranges, &from);
         SET(ranges->ranges_to+ranges->num_ranges, &to);
         break;
@@ -283,8 +281,6 @@ uint8_t rte_bv_add_range_gpu(rte_bv_ranges_t *ranges, uint32_t from, uint32_t to
 
         SET(ranges->ranges_from+(ranges->num_ranges>>1), &from_b);
         SET(ranges->ranges_to+(ranges->num_ranges>>1), &to_b);
-
-        printf("%hhu, %lu: ADD %04X:%04X now: %08X <-> %08X\n", cast_type, ranges->num_ranges, from, to, from_b, to_b);
         break;
     case 1:
         GET(&from_b, ranges->ranges_from+(ranges->num_ranges>>2));
@@ -298,7 +294,6 @@ uint8_t rte_bv_add_range_gpu(rte_bv_ranges_t *ranges, uint32_t from, uint32_t to
 
         SET(ranges->ranges_from+(ranges->num_ranges>>2), &from_b);
         SET(ranges->ranges_to+(ranges->num_ranges>>2), &to_b);
-        printf("%hhu, %lu: ADD %02X:%02X now: %08X <-> %08X\n", cast_type, ranges->num_ranges, from, to, from_b, to_b);
         break;
     default:
         fprintf(stderr, "[rte_bv_add_range_host] unkown cast_type: %hhu\n", cast_type);
