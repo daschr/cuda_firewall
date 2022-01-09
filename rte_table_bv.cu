@@ -395,7 +395,7 @@ __constant__ uint8_t compression_level[5]= {0,2,1,0,0};
 
 __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
                             uint32_t *__restrict__ *__restrict__ ranges_to,
-                            const uint64_t *__restrict__ num_ranges,
+                            uint64_t *__restrict__ num_ranges,
                             uint32_t *__restrict__ offsets, uint8_t *__restrict__ sizes,
                             uint32_t *__restrict__ *__restrict__ bvs, uint32_t *__restrict__ *__restrict__ non_zero_bvs,
                             const uint32_t num_fields,
@@ -409,8 +409,8 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
     if(!((pkts_mask>>pkt_id)&1LU))
         return;
 
-    __shared__ uint const *__restrict__ bv[32][RTE_TABLE_BV_MAX_FIELDS];
-    __shared__ uint const *__restrict__ non_zero_bv[32][RTE_TABLE_BV_MAX_FIELDS];
+    __shared__ uint *__restrict__ bv[32][RTE_TABLE_BV_MAX_FIELDS];
+    __shared__ uint *__restrict__ non_zero_bv[32][RTE_TABLE_BV_MAX_FIELDS];
     __shared__ uint32_t bv_not_found[32];
     const uint8_t field_size=sizes[field_id];
     const uint8_t comp_level=compression_level[field_size];
@@ -419,7 +419,7 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
     if(!threadIdx.x) {
         bv_not_found[threadIdx.y]=0;
         bv[threadIdx.y][field_id]=NULL;
-        const uint8_t *pkt=(uint8_t * ) pkts[pkt_id]+offsets[field_id];
+        uint8_t *pkt=(uint8_t * ) pkts[pkt_id]+offsets[field_id];
         switch(field_size) {
         case 1:
             v=(*pkt<<24)|(*pkt<<16)|(*pkt<<8)|*pkt;
@@ -489,14 +489,13 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
 
 found_bv:
 
-    if(!threadIdx.x && !bv[threadIdx.y][field_id]) {
+    if(!threadIdx.x && !bv[threadIdx.y][field_id])
         bv_not_found[threadIdx.y]=1;
-    }
+
+    __syncthreads();
 
     if(threadIdx.z!=0)
         return;
-
-    __syncthreads();
 
     if(bv_not_found[threadIdx.y])
         return;
