@@ -9,11 +9,9 @@
 #define DEFAULT_NB_RX_DESC 4096
 #define DEFAULT_NB_TX_DESC 4096
 
-#define BURST_SIZE 64
+#define BURST_SIZE 512
 
 #define GPU_PAGE_SIZE (1U<<16)
-
-#define RTE_TABLE_VAL_DROP 1
 
 #define DEFAULT_NB_QUEUES 2
 #endif

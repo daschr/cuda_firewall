@@ -111,7 +111,6 @@ static int firewall(void *arg) {
 #endif
 
     if(rte_lcore_id()&1) {
-        uint64_t lookup_hit_mask, pkts_mask;
         uint8_t **actions, **actions_d;
 
         cudaHostAlloc((void **) &actions, sizeof(uint8_t *)*BURST_SIZE, cudaHostAllocMapped);
@@ -139,13 +138,11 @@ static int firewall(void *arg) {
             if(unlikely(nb_rx==0))
                 continue;
 
-            pkts_mask=nb_rx==64?UINT64_MAX:((1LU<<nb_rx)-1);
-
 #ifdef MEASURE_TIME
             gettimeofday(&t1, NULL);
 #endif
 
-            rte_table_bv_lookup_stream(conf->table, stream, lookup_hit_vec, pkts_data, bufs_rx_d, pkts_mask, (uint64_t *) &lookup_hit_mask, (void **) actions_d);
+            rte_table_bv_lookup_stream(conf->table, stream, lookup_hit_vec, pkts_data, bufs_rx_d, nb_rx, (void **) actions_d);
 
 #ifdef MEASURE_TIME
             gettimeofday(&t2, NULL);
@@ -156,7 +153,7 @@ static int firewall(void *arg) {
             j=0;
 
             for(; i<nb_rx; ++i) {
-                if(unlikely(!((lookup_hit_mask>>i)&1))) {
+                if(unlikely(!lookup_hit_vec[i])) {
                     bufs_tx[j++]=bufs_rx[i];
                     if(conf->tap_macaddr!=NULL)
                         rte_memcpy(&(rte_pktmbuf_mtod(bufs_rx[i], struct rte_ether_hdr *)->dst_addr), conf->tap_macaddr, 6);
@@ -307,19 +304,11 @@ int main(int ac, char *as[]) {
                                     sizeof(struct rte_ipv4_hdr)+offsetof(struct rte_tcp_hdr, src_port),
                                     sizeof(struct rte_ipv4_hdr)+offsetof(struct rte_tcp_hdr, dst_port)
                                },
-                               fdefs_sizes[5]= {1,4,4,2,2},
-    ptype_masks[5] = {
-        RTE_PTYPE_L2_ETHER|RTE_PTYPE_L3_MASK|RTE_PTYPE_L4_MASK,
-        RTE_PTYPE_L2_MASK|RTE_PTYPE_L3_IPV4|RTE_PTYPE_L4_MASK,
-        RTE_PTYPE_L2_MASK|RTE_PTYPE_L3_IPV4|RTE_PTYPE_L4_MASK,
-        RTE_PTYPE_L2_MASK|RTE_PTYPE_L3_IPV4|RTE_PTYPE_L4_TCP|RTE_PTYPE_L4_UDP,
-        RTE_PTYPE_L2_MASK|RTE_PTYPE_L3_IPV4|RTE_PTYPE_L4_TCP|RTE_PTYPE_L4_UDP
-    };
+                               fdefs_sizes[5]= {1,4,4,2,2};
 
     for(size_t i=0; i<5; ++i) {
         fdefs[i].offset=sizeof(struct rte_ether_hdr) + fdefs_offsets[i];
         fdefs[i].type=RTE_TABLE_BV_FIELD_TYPE_RANGE;
-        fdefs[i].ptype_mask=ptype_masks[i];
         fdefs[i].size=fdefs_sizes[i];
     }
 

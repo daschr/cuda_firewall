@@ -15,7 +15,7 @@ extern "C" {
 #define RTE_TABLE_BV_MAX_RANGES ((size_t) (RTE_BV_MARKERS_MAX_ENTRIES>>1))
 #define RTE_TABLE_BV_BS	((size_t) (RTE_TABLE_BV_MAX_RANGES>>5)+1)
 #define RTE_TABLE_NON_ZERO_BV_BS ((size_t) (((RTE_TABLE_BV_MAX_RANGES>>5)+1)>>5)+1)
-#define RTE_TABLE_BV_MAX_PKTS 64
+#define RTE_TABLE_BV_MAX_PKTS 512
 #define RTE_TABLE_BV_MAX_FIELDS 24
 
 enum {
@@ -25,7 +25,6 @@ enum {
 
 struct rte_table_bv_field_def {
     uint32_t offset; // offset from data start
-    uint32_t ptype_mask; // packet type mask needed for matching
 
     uint8_t type;
     uint8_t size; // in bytes
@@ -52,7 +51,7 @@ struct rte_table_bv_key {
 extern struct rte_table_ops rte_table_bv_ops;
 
 int rte_table_bv_lookup_stream(void *t_r, cudaStream_t stream, uint8_t *lookup_hit_vec, uint8_t **pkts_data,
-                               struct rte_mbuf **pkts, uint64_t pkts_mask, uint64_t *lookup_hit_mask, void **e);
+                               struct rte_mbuf **pkts, uint64_t num_pkts, void **e);
 
 
 #ifdef __cplusplus
