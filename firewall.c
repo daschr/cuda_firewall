@@ -46,6 +46,8 @@ extern "C" {
 
 #define RTE_LOGTYPE_APP RTE_LOGTYPE_USER1
 
+#define MEASURE_TIME
+
 typedef struct {
     void *table;
     uint8_t *actions;
@@ -117,6 +119,10 @@ static int firewall(void *arg) {
 
     stats_t *stats=((stats_t *) conf->stats)+((rte_lcore_id()&1)^1);
 
+#ifdef MEASURE_TIME
+    struct timeval t1,t2;
+#endif
+
     if(rte_lcore_id()&1) {
         volatile uint64_t lookup_hit_mask;
         uint64_t pkts_mask;
@@ -139,7 +145,16 @@ static int firewall(void *arg) {
 
             pkts_mask=nb_rx==64?UINT64_MAX:((1LU<<nb_rx)-1);
 
+#ifdef MEASURE_TIME
+            gettimeofday(&t1, NULL);
+#endif
+
             rte_table_acl_ops.f_lookup(conf->table, bufs_rx, pkts_mask, (uint64_t *) &lookup_hit_mask, (void **) actions);
+
+#ifdef MEASURE_TIME
+            gettimeofday(&t2, NULL);
+            printf("LOOKUP took %luus\n", (t2.tv_sec*1000000+t2.tv_usec)-(t1.tv_sec*1000000+t1.tv_usec));
+#endif
 
             i=0;
             j=0;
@@ -289,7 +304,7 @@ int main(int ac, char *as[]) {
 
     struct rte_table_acl_params table_params;
     table_params.name="2tuple";
-    table_params.n_rules=40050;
+    table_params.n_rules=100000;
     table_params.n_rule_fields=5;
 
     fdefs_offsets[0]=offsetof(struct rte_ipv4_hdr, next_proto_id);
@@ -321,23 +336,24 @@ int main(int ac, char *as[]) {
         goto err;
 
     rte_table_acl_ops.f_add_bulk(table, (void **) ruleset.rules, (void **) actions, ruleset.num_rules, key_found, (void **) entry_handles);
-
-#define FIELD(I, X, B) (ruleset.rules[I]->field_value[X].value.u##B)
-#define MASK(I, X, B) (ruleset.rules[I]->field_value[X].mask_range.u##B)
-    for(uint32_t i=0; i<ruleset.num_rules; ++i) {
-        printf("key_found: %d entry_handles: %p entry_handles[%u]: %u\n", key_found[i], entry_handles[i], i, *((uint8_t *) entry_handles[i]));
-        printf("%u: %02X-%02X %08X-%08X %08X-%08X %04X-%04X %04X-%04X\n",
-               i,
-               FIELD(i, 0, 8), MASK(i, 0, 8),
-               FIELD(i, 1, 32), MASK(i, 1, 32),
-               FIELD(i, 2, 32), MASK(i, 2, 32),
-               FIELD(i, 3, 16), MASK(i, 3, 16),
-               FIELD(i, 4, 16), MASK(i, 4, 16)
-              );
-    }
-#undef FIELD
-#undef MASK
-
+    /*
+    #define FIELD(I, X, B) (ruleset.rules[I]->field_value[X].value.u##B)
+    #define MASK(I, X, B) (ruleset.rules[I]->field_value[X].mask_range.u##B)
+        for(uint32_t i=0; i<ruleset.num_rules; ++i) {
+            printf("key_found: %d entry_handles: %p entry_handles[%u]: %u\n", key_found[i], entry_handles[i], i, *((uint8_t *) entry_handles[i]));
+            printf("%u: %02X-%02X %08X-%08X %08X-%08X %04X-%04X %04X-%04X\n",
+                   i,
+                   FIELD(i, 0, 8), MASK(i, 0, 8),
+                   FIELD(i, 1, 32), MASK(i, 1, 32),
+                   FIELD(i, 2, 32), MASK(i, 2, 32),
+                   FIELD(i, 3, 16), MASK(i, 3, 16),
+                   FIELD(i, 4, 16), MASK(i, 4, 16)
+                  );
+        }
+    #undef FIELD
+    #undef MASK
+    */
+    printf("added rules...\n");
     free_ruleset_except_actions(&ruleset);
 
     fw_conf=(firewall_conf_t) {
