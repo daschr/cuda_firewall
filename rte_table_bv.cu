@@ -18,6 +18,8 @@ extern "C" {
 #define NUM_BLOCKS 64
 #define WORKERS_PER_FIELD 32
 
+//#define MEASURE_TIME
+
 #ifdef RTE_TABLE_STATS_COLLECT
 #define RTE_TABLE_BV_STATS_PKTS_IN_ADD(table, val) table->stats.n_pkts_in += val
 #define RTE_TABLE_BV_STATS_PKTS_LOOKUP_MISS(table, val) table->stats.n_pkts_lookup_miss += val
@@ -37,6 +39,7 @@ struct rte_table_bv {
     uint32_t ptype_mask;
     uint32_t num_rules;
     uint32_t entry_size;
+
     uint8_t *entries;
 
     uint32_t **ranges_from;
@@ -58,7 +61,6 @@ struct rte_table_bv {
 
     uint8_t *lookup_hit_vec;
     uint8_t *lookup_hit_vec_h;
-
     rte_bv_markers_t *bv_markers; // size==num_fields
 };
 
@@ -114,7 +116,7 @@ static void *rte_table_bv_create(void *params, int socket_id, uint32_t entry_siz
     memset(t, 0, sizeof(struct rte_table_bv));
 
     t->num_fields=p->num_fields;
-    t->packets_per_block=32/p->num_fields;
+    t->packets_per_block=16/p->num_fields;
     t->num_blocks=ceil(64.0f/((double) t->packets_per_block));
     printf("packets_per_block: %u num_blocks: %u\n", t->packets_per_block, t->num_blocks);
 
@@ -391,7 +393,7 @@ __device__ __inline__ uint32_t leu_offset(const uint32_t x, const uint8_t size) 
 }
 
 
-__constant__ uint8_t compression_level[5]= {0,2,1,0,0};
+__device__ __constant__ uint8_t compression_level[5]= {0,2,1,0,0};
 
 __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
                             uint32_t *__restrict__ *__restrict__ ranges_to,
@@ -400,7 +402,7 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
                             uint32_t *__restrict__ *__restrict__ bvs, uint32_t *__restrict__ *__restrict__ non_zero_bvs,
                             const uint32_t num_fields,
                             const uint32_t entry_size, uint8_t *__restrict__ entries,
-                            uint64_t pkts_mask, uint8_t *__restrict__ *__restrict__ pkts,
+                            const uint64_t pkts_mask, uint8_t *__restrict__ *__restrict__ pkts,
                             void *__restrict__ *matched_entries, uint8_t *__restrict__ lookup_hit_vec) {
 
 #define field_id threadIdx.z
@@ -409,15 +411,13 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
     if(!((pkts_mask>>pkt_id)&1LU))
         return;
 
-    __shared__ uint *__restrict__ bv[32][RTE_TABLE_BV_MAX_FIELDS];
+    __shared__ uint *__restrict__ bv[32][32];
     __shared__ uint *__restrict__ non_zero_bv[32][RTE_TABLE_BV_MAX_FIELDS];
-    __shared__ uint32_t bv_not_found[32];
     const uint8_t field_size=sizes[field_id];
     const uint8_t comp_level=compression_level[field_size];
 
     uint v;
     if(!threadIdx.x) {
-        bv_not_found[threadIdx.y]=0;
         bv[threadIdx.y][field_id]=NULL;
         uint8_t *pkt=(uint8_t * ) pkts[pkt_id]+offsets[field_id];
         switch(field_size) {
@@ -459,6 +459,7 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
                 bv[threadIdx.y][field_id]=bvs[field_id]+pos*RTE_TABLE_BV_BS;
                 non_zero_bv[threadIdx.y][field_id]=non_zero_bvs[field_id]+pos*RTE_TABLE_NON_ZERO_BV_BS;
             }
+            __syncwarp();
             goto found_bv;
         }
         if(!l)
@@ -466,7 +467,7 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
 
         r=__popc(l)-1;
         start=__shfl_sync(UINT32_MAX, offset+1, r);
-        size=r==31?(num_ranges[field_id]-start)>>5:(size-1)>>5;
+        size=r==31?((num_ranges[field_id]>>comp_level)-start)>>5:(size-1LU)>>5;
 
         __syncwarp();
     }
@@ -485,27 +486,24 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
                 non_zero_bv[threadIdx.y][field_id]=non_zero_bvs[field_id]+pos*RTE_TABLE_NON_ZERO_BV_BS;
             }
         }
+        __syncwarp();
     }
 
 found_bv:
 
-    if(!threadIdx.x && !bv[threadIdx.y][field_id])
-        bv_not_found[threadIdx.y]=1;
-
     __syncthreads();
-
-    if(threadIdx.z!=0)
+    if(field_id)
         return;
 
-    if(bv_not_found[threadIdx.y])
-        return;
 
 #undef field_id
 
-    __syncwarp();
+    if(__ballot_sync(UINT32_MAX, threadIdx.x<num_fields&&!bv[threadIdx.y][threadIdx.x]))
+        return;
 
     // all bitvectors found, now getting highest-priority rule
 
+    __syncwarp();
     int nz_bv_b=threadIdx.x;
     while(nz_bv_b<RTE_TABLE_NON_ZERO_BV_BS) { // TODO maybe use WORKERS_PER_PACKET
         const uint32_t in_loop=__activemask();
@@ -533,20 +531,20 @@ found_bv:
         __syncwarp(in_loop); //TODO maybe remove
         if((x=__ballot_sync(in_loop, __ffs(y)))) {
             if((__ffs(x)-1)==threadIdx.x) {
-                //printf("matched_entries[%d]=&entries[%lu]\n", pkt_id, entry_size*((nz_bv_b<<5)+__ffs(y)-1LU));
                 matched_entries[pkt_id]=(void *) &entries[entry_size*((nz_bv_b<<5)+__ffs(y)-1LU)];
                 lookup_hit_vec[pkt_id]=1;
             }
             break;
         }
         nz_bv_b+=blockDim.x;
+        __syncwarp(in_loop);
     }
 }
 
 
 #define IS_ERROR(X) is_error(X, __FILE__, __LINE__)
-int rte_table_bv_lookup_stream(void *t_r, cudaStream_t stream, struct rte_mbuf **pkts, uint64_t pkts_mask,
-                               uint64_t *lookup_hit_mask, void **e) {
+int rte_table_bv_lookup_stream(void *t_r, cudaStream_t stream, uint8_t *lookup_hit_vec, uint8_t **pkts_data,
+                               struct rte_mbuf **pkts, uint64_t pkts_mask, uint64_t *lookup_hit_mask, void **e) {
 #ifdef MEASURE_TIME
     struct timeval k_t1,k_t2,l_t1,l_t2;
     gettimeofday(&l_t1, NULL);
@@ -561,7 +559,7 @@ int rte_table_bv_lookup_stream(void *t_r, cudaStream_t stream, struct rte_mbuf *
     for(uint32_t i=0; i<n_pkts_in; ++i) {
         const uint32_t mp=pkts[i]->packet_type&t->ptype_mask;
         if((pkts_mask>>i)&1&((mp&RTE_PTYPE_L2_MASK)!=0)&((mp&RTE_PTYPE_L3_MASK)!=0)&((mp&RTE_PTYPE_L4_MASK)!=0)) {
-            t->pkts_data_h[i]=rte_pktmbuf_mtod(pkts[i], uint8_t *);
+            pkts_data[i]=rte_pktmbuf_mtod(pkts[i], uint8_t *);
             real_pkts_mask|=1LU<<i;
         }
     }
@@ -570,11 +568,12 @@ int rte_table_bv_lookup_stream(void *t_r, cudaStream_t stream, struct rte_mbuf *
     gettimeofday(&k_t1, NULL);
 #endif
 
-    bv_search<<<t->num_blocks, dim3{WORKERS_PER_FIELD, t->packets_per_block, t->num_fields}, 0, stream>>>(	t->ranges_from_dev, t->ranges_to_dev, t->num_ranges,
-            t->field_offsets, t->field_sizes,
-            t->bvs_dev, t->non_zero_bvs_dev, t->num_fields, t->entry_size, t->entries,
-            real_pkts_mask, t->pkts_data,
-            e, t->lookup_hit_vec);
+    bv_search<<<t->num_blocks, dim3{WORKERS_PER_FIELD, t->packets_per_block, t->num_fields}, 0, stream>>>(
+        t->ranges_from_dev, t->ranges_to_dev, t->num_ranges,
+        t->field_offsets, t->field_sizes,
+        t->bvs_dev, t->non_zero_bvs_dev, t->num_fields, t->entry_size, t->entries,
+        real_pkts_mask, pkts_data,
+        e, lookup_hit_vec);
 
     cudaStreamSynchronize(stream);
 
@@ -584,9 +583,9 @@ int rte_table_bv_lookup_stream(void *t_r, cudaStream_t stream, struct rte_mbuf *
 #endif
     uint64_t lhm=0;
     for(uint32_t i=0; i<n_pkts_in; ++i) {
-        if(t->lookup_hit_vec_h[i]) {
+        if(lookup_hit_vec[i]) {
             lhm|=1LU<<i;
-            t->lookup_hit_vec_h[i]=0;
+            lookup_hit_vec[i]=0;
         }
     }
     *lookup_hit_mask=lhm;

@@ -122,6 +122,10 @@ static int firewall(void *arg) {
         cudaHostAlloc((void **) &bufs_rx, sizeof(struct rte_mbuf*)*BURST_SIZE, cudaHostAllocMapped);
         cudaHostGetDevicePointer((void **) &bufs_rx_d, bufs_rx, 0);
 
+        uint8_t **pkts_data, *lookup_hit_vec;
+        cudaHostAlloc((void **) &pkts_data, sizeof(uint8_t*)*BURST_SIZE, cudaHostAllocMapped|cudaHostAllocWriteCombined);
+        cudaHostAlloc((void **) &lookup_hit_vec, sizeof(uint8_t*)*BURST_SIZE, cudaHostAllocMapped);
+
         struct rte_mbuf *bufs_tx[BURST_SIZE];
 
         cudaStream_t stream;
@@ -141,7 +145,7 @@ static int firewall(void *arg) {
             gettimeofday(&t1, NULL);
 #endif
 
-            rte_table_bv_lookup_stream(conf->table, stream, bufs_rx_d, pkts_mask, (uint64_t *) &lookup_hit_mask, (void **) actions_d);
+            rte_table_bv_lookup_stream(conf->table, stream, lookup_hit_vec, pkts_data, bufs_rx_d, pkts_mask, (uint64_t *) &lookup_hit_mask, (void **) actions_d);
 
 #ifdef MEASURE_TIME
             gettimeofday(&t2, NULL);

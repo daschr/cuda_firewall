@@ -51,8 +51,8 @@ struct rte_table_bv_key {
 
 extern struct rte_table_ops rte_table_bv_ops;
 
-int rte_table_bv_lookup_stream(void *t_r, cudaStream_t stream, struct rte_mbuf **pkts, uint64_t pkts_mask,
-                               uint64_t *lookup_hit_mask, void **e);
+int rte_table_bv_lookup_stream(void *t_r, cudaStream_t stream, uint8_t *lookup_hit_vec, uint8_t **pkts_data,
+                               struct rte_mbuf **pkts, uint64_t pkts_mask, uint64_t *lookup_hit_mask, void **e);
 
 
 #ifdef __cplusplus
