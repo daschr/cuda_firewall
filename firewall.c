@@ -46,7 +46,7 @@ extern "C" {
 
 #define RTE_LOGTYPE_APP RTE_LOGTYPE_USER1
 
-#define MEASURE_TIME
+//#define MEASURE_TIME
 
 typedef struct {
     void *table;
