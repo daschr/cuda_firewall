@@ -181,19 +181,19 @@ void rte_bv_markers_range_del(rte_bv_markers_t *markers, const uint32_t *from_to
 typedef struct {
     size_t bv_size;
     size_t non_zero_bv_size;
-    uint32_t *bv;
-    uint32_t *non_zero_bv;
+    uint64_t *bv;
+    uint64_t *non_zero_bv;
 } bv_t;
 
 inline void bv_set(bv_t *bv, uint32_t pos) {
-    bv->bv[pos>>5]|=1<<(pos&31);
-    bv->non_zero_bv[pos>>10]|=1<<((pos>>5)&31);
+    bv->bv[pos>>6]|=1LU<<(pos&63);
+    bv->non_zero_bv[pos>>12]|=1LU<<((pos>>6)&63);
 }
 
 inline void bv_unset(bv_t *bv, uint32_t pos) {
-    bv->bv[pos>>5]&=~(1<<(pos&31));
-    if(!bv->bv[pos>>5])
-        bv->non_zero_bv[pos>>10]&=~(1<<((pos>>5)&31));
+    bv->bv[pos>>6]&=~(1LU<<(pos&63));
+    if(!bv->bv[pos>>6])
+        bv->non_zero_bv[pos>>12]&=~(1LU<<((pos>>6)&63));
 }
 
 inline void bv_set_list(bv_t *bv, size_t num_markers, const rte_bv_marker_t *list) {
@@ -246,8 +246,8 @@ uint8_t rte_bv_add_range_host(rte_bv_ranges_t *ranges, uint32_t from, uint32_t t
         break;
     }
 
-    memcpy(ranges->bvs+(ranges->num_ranges*ranges->bv_bs), bv->bv, sizeof(uint32_t)*bv->bv_size);
-    memcpy(ranges->non_zero_bvs+(ranges->num_ranges*((ranges->bv_bs>>5)+1)), bv->non_zero_bv, sizeof(uint32_t)*bv->non_zero_bv_size);
+    memcpy(ranges->bvs+(ranges->num_ranges*ranges->bv_bs), bv->bv, sizeof(uint64_t)*bv->bv_size);
+    memcpy(ranges->non_zero_bvs+(ranges->num_ranges*((ranges->bv_bs>>6)+1)), bv->non_zero_bv, sizeof(uint64_t)*bv->non_zero_bv_size);
     ++ranges->num_ranges;
     return 0;
 }
@@ -304,8 +304,8 @@ uint8_t rte_bv_add_range_gpu(rte_bv_ranges_t *ranges, uint32_t from, uint32_t to
 #undef SET
 #undef GET
 
-    CHECK(cudaMemcpy(ranges->bvs+(ranges->num_ranges*((size_t) ranges->bv_bs)), bv->bv, sizeof(uint32_t)*bv->bv_size, cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpy(ranges->non_zero_bvs+(ranges->num_ranges*((size_t) ((ranges->bv_bs>>5)+1))), bv->non_zero_bv, sizeof(uint32_t)*bv->non_zero_bv_size, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(ranges->bvs+(ranges->num_ranges*((size_t) ranges->bv_bs)), bv->bv, sizeof(uint64_t)*bv->bv_size, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(ranges->non_zero_bvs+(ranges->num_ranges*((size_t) ((ranges->bv_bs>>6)+1))), bv->non_zero_bv, sizeof(uint64_t)*bv->non_zero_bv_size, cudaMemcpyHostToDevice));
     ++ranges->num_ranges;
     return 0;
 }
@@ -325,12 +325,12 @@ int rte_bv_markers_to_ranges(rte_bv_markers_t *markers, const uint8_t gpu, const
     uint8_t (*add_range)(rte_bv_ranges_t *, uint32_t, uint32_t, uint8_t, const bv_t *)=gpu?&rte_bv_add_range_gpu:&rte_bv_add_range_host;
 
     bv_t bv;
-    bv.bv_size=(markers->max_value>>5)+1;
-    bv.non_zero_bv_size=(bv.bv_size>>5)+1;
-    bv.bv=malloc(sizeof(uint32_t)*bv.bv_size);
-    bv.non_zero_bv=malloc(sizeof(uint32_t)*bv.non_zero_bv_size);
-    memset(bv.bv, 0, sizeof(uint32_t)*bv.bv_size);
-    memset(bv.non_zero_bv, 0, sizeof(uint32_t)*bv.non_zero_bv_size);
+    bv.bv_size=(markers->max_value>>6)+1;
+    bv.non_zero_bv_size=(bv.bv_size>>6)+1;
+    bv.bv=malloc(sizeof(uint64_t)*bv.bv_size);
+    bv.non_zero_bv=malloc(sizeof(uint64_t)*bv.non_zero_bv_size);
+    memset(bv.bv, 0, sizeof(uint64_t)*bv.bv_size);
+    memset(bv.non_zero_bv, 0, sizeof(uint64_t)*bv.non_zero_bv_size);
 
     //create sorted array of marker lists
     vp_t *marker_lists=(vp_t *) malloc(sizeof(vp_t)*markers->num_lists);

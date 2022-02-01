@@ -37,8 +37,8 @@ struct rte_table_bv {
 
     uint32_t **ranges_from;
     uint32_t **ranges_to;
-    uint32_t **bvs;
-    uint32_t **non_zero_bvs;
+    uint64_t **bvs;
+    uint64_t **non_zero_bvs;
 
     size_t *num_ranges;
     uint32_t *field_offsets;
@@ -46,8 +46,8 @@ struct rte_table_bv {
 
     uint32_t **ranges_from_dev;
     uint32_t **ranges_to_dev;
-    uint32_t **bvs_dev;
-    uint32_t **non_zero_bvs_dev;
+    uint64_t **bvs_dev;
+    uint64_t **non_zero_bvs_dev;
 
     uint8_t **pkts_data;
     uint8_t **pkts_data_h;
@@ -118,8 +118,8 @@ static void *rte_table_bv_create(void *params, int socket_id, uint32_t entry_siz
 
     t->ranges_from=(uint32_t **) rte_malloc("ranges_from", sizeof(uint32_t *)*t->num_fields, 0);
     t->ranges_to=(uint32_t **) rte_malloc("ranges_to", sizeof(uint32_t *)*t->num_fields, 0);
-    t->bvs=(uint32_t **) rte_malloc("bvs", sizeof(uint32_t *)*t->num_fields, 0);
-    t->non_zero_bvs=(uint32_t **) rte_malloc("non_zero_bvs", sizeof(uint32_t *)*t->num_fields, 0);
+    t->bvs=(uint64_t **) rte_malloc("bvs", sizeof(uint64_t *)*t->num_fields, 0);
+    t->non_zero_bvs=(uint64_t **) rte_malloc("non_zero_bvs", sizeof(uint64_t *)*t->num_fields, 0);
 
 #define IS_ERROR(X) is_error(X, __FILE__, __LINE__)
 #define CHECK(X) if(IS_ERROR(X)) return NULL
@@ -134,8 +134,8 @@ static void *rte_table_bv_create(void *params, int socket_id, uint32_t entry_siz
 
     CHECK(cudaMalloc((void **) &t->ranges_from_dev, sizeof(uint32_t *)*t->num_fields));
     CHECK(cudaMalloc((void **) &t->ranges_to_dev, sizeof(uint32_t *)*t->num_fields));
-    CHECK(cudaMalloc((void **) &t->bvs_dev, sizeof(uint32_t *)*t->num_fields));
-    CHECK(cudaMalloc((void **) &t->non_zero_bvs_dev, sizeof(uint32_t *)*t->num_fields));
+    CHECK(cudaMalloc((void **) &t->bvs_dev, sizeof(uint64_t *)*t->num_fields));
+    CHECK(cudaMalloc((void **) &t->non_zero_bvs_dev, sizeof(uint64_t *)*t->num_fields));
     CHECK(cudaMalloc((void **) &t->field_offsets, sizeof(uint32_t)*t->num_fields));
     CHECK(cudaMalloc((void **) &t->field_sizes, sizeof(uint32_t)*t->num_fields));
     CHECK(cudaMalloc((void **) &t->num_ranges, sizeof(uint64_t)*t->num_fields));
@@ -167,16 +167,16 @@ static void *rte_table_bv_create(void *params, int socket_id, uint32_t entry_siz
         }
 #undef RANGE_SIZE
 
-        printf("size: bvs[%lu] %lu bytes\n", i, sizeof(uint32_t)*((size_t) RTE_TABLE_BV_BS) * ((size_t ) RTE_TABLE_BV_MAX_RANGES));
-        CHECK(cudaMalloc((void **) &t->bvs[i], sizeof(uint32_t)*((size_t) RTE_TABLE_BV_BS) * ((size_t ) RTE_TABLE_BV_MAX_RANGES)));
-        printf("size: non_zero_bvs[%lu] %lu bytes\n", i, sizeof(uint32_t)*((size_t) RTE_TABLE_BV_BS>>5) * ((size_t ) RTE_TABLE_BV_MAX_RANGES));
-        CHECK(cudaMalloc((void **) &t->non_zero_bvs[i], sizeof(uint32_t)*((size_t) RTE_TABLE_BV_BS>>5) * ((size_t ) RTE_TABLE_BV_MAX_RANGES)));
+        printf("size: bvs[%lu] %lu bytes\n", i, sizeof(uint64_t)*((size_t) RTE_TABLE_BV_BS) * ((size_t ) RTE_TABLE_BV_MAX_RANGES));
+        CHECK(cudaMalloc((void **) &t->bvs[i], sizeof(uint64_t)*((size_t) RTE_TABLE_BV_BS) * ((size_t ) RTE_TABLE_BV_MAX_RANGES)));
+        printf("size: non_zero_bvs[%lu] %lu bytes\n", i, sizeof(uint64_t)*((size_t) RTE_TABLE_BV_BS>>5) * ((size_t ) RTE_TABLE_BV_MAX_RANGES));
+        CHECK(cudaMalloc((void **) &t->non_zero_bvs[i], sizeof(uint64_t)*((size_t) RTE_TABLE_BV_BS>>5) * ((size_t ) RTE_TABLE_BV_MAX_RANGES)));
     }
 
     CHECK(cudaMemcpy(t->ranges_from_dev, t->ranges_from, sizeof(uint32_t *)*t->num_fields, cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(t->ranges_to_dev, t->ranges_to, sizeof(uint32_t *)*t->num_fields, cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpy(t->bvs_dev, t->bvs, sizeof(uint32_t *)*t->num_fields, cudaMemcpyHostToDevice));
-    CHECK(cudaMemcpy(t->non_zero_bvs_dev, t->non_zero_bvs, sizeof(uint32_t *)*t->num_fields, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(t->bvs_dev, t->bvs, sizeof(uint64_t *)*t->num_fields, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(t->non_zero_bvs_dev, t->non_zero_bvs, sizeof(uint64_t *)*t->num_fields, cudaMemcpyHostToDevice));
 #undef CHECK
 #undef IS_ERROR
 
@@ -389,7 +389,7 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
                             uint32_t *__restrict__ *__restrict__ ranges_to,
                             uint64_t *__restrict__ num_ranges,
                             uint32_t *__restrict__ offsets, uint8_t *__restrict__ sizes,
-                            uint32_t *__restrict__ *__restrict__ bvs, uint32_t *__restrict__ *__restrict__ non_zero_bvs,
+                            uint64_t *__restrict__ *__restrict__ bvs, uint64_t *__restrict__ *__restrict__ non_zero_bvs,
                             const uint32_t num_fields,
                             const uint32_t entry_size, uint8_t *__restrict__ entries,
                             const uint64_t num_pkts, uint8_t *__restrict__ *__restrict__ pkts,
@@ -401,8 +401,8 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
     if(pkt_id>=num_pkts)
         return;
 
-    __shared__ uint *__restrict__ bv[32][32];
-    __shared__ uint *__restrict__ non_zero_bv[32][RTE_TABLE_BV_MAX_FIELDS];
+    __shared__ uint64_t *__restrict__ bv[32][32];
+    __shared__ uint64_t *__restrict__ non_zero_bv[32][RTE_TABLE_BV_MAX_FIELDS];
     const uint8_t field_size=sizes[field_id];
     const uint8_t comp_level=compression_level[field_size];
 
@@ -445,7 +445,6 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
                     goto found_bv;
 
                 const long pos=(offset<<comp_level)|leu_offset(lres&rres, field_size);
-
                 bv[threadIdx.y][field_id]=bvs[field_id]+pos*RTE_TABLE_BV_BS;
                 non_zero_bv[threadIdx.y][field_id]=non_zero_bvs[field_id]+pos*RTE_TABLE_NON_ZERO_BV_BS;
             }
@@ -464,6 +463,8 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
     offset=start+threadIdx.x;
     lres=offset<num_ranges[field_id]?leu(ranges_from[field_id][offset],v,field_size):0;
     rres=offset<num_ranges[field_id]?leu(v,ranges_to[field_id][offset],field_size):0;
+
+    __syncwarp();
 
     l=__ballot_sync(UINT32_MAX, lres);
     r=__ballot_sync(UINT32_MAX, rres);
@@ -484,27 +485,29 @@ found_bv:
     if(field_id)
         return;
 
-
 #undef field_id
 
-    if(__ballot_sync(UINT32_MAX, threadIdx.x<num_fields&&!bv[threadIdx.y][threadIdx.x]))
+    if(__ballot_sync(UINT32_MAX, threadIdx.x<num_fields&&!bv[threadIdx.y][threadIdx.x])) {
+        if(!threadIdx.x)
+            lookup_hit_vec[pkt_id]=0;
+
         return;
+    }
 
     // all bitvectors found, now getting highest-priority rule
 
-    __syncwarp();
     int nz_bv_b=threadIdx.x;
-    while(nz_bv_b<RTE_TABLE_NON_ZERO_BV_BS) { // TODO maybe use WORKERS_PER_PACKET
-        const uint32_t in_loop=__activemask();
+    uint32_t in_loop=__ballot_sync(UINT32_MAX, nz_bv_b<RTE_TABLE_NON_ZERO_BV_BS);
 
-        uint32_t x=non_zero_bv[threadIdx.y][0][nz_bv_b];
+    while(nz_bv_b<RTE_TABLE_NON_ZERO_BV_BS) {
+        uint64_t x=non_zero_bv[threadIdx.y][0][nz_bv_b];
         for(int field_id=1; field_id<num_fields; ++field_id)
             x&=non_zero_bv[threadIdx.y][field_id][nz_bv_b];
 
         int pos;
-        uint32_t y;
-        while((pos=__ffs(x))) {
-            const int p=(nz_bv_b<<5)|(pos-1);
+        uint64_t y=0;
+        while((pos=__ffsll(x))) {
+            const int p=(nz_bv_b<<6)|(pos-1);
 
             y=bv[threadIdx.y][0][p];
             for(int field_id=1; field_id<num_fields; ++field_id)
@@ -517,16 +520,18 @@ found_bv:
             x<<=pos;
         }
 
-        __syncwarp(in_loop); //TODO maybe remove
-        if((x=__ballot_sync(in_loop, __ffs(y)))) {
-            if((__ffs(x)-1)==threadIdx.x) {
-                matched_entries[pkt_id]=(void *) &entries[entry_size*((nz_bv_b<<5)+__ffs(y)-1LU)];
+// __syncwarp(in_loop); //TODO maybe remove
+        const uint32_t tm=__ballot_sync(in_loop, __ffsll(y));
+        if(tm) {
+            if((__ffs(tm)-1)==threadIdx.x) {
+                matched_entries[pkt_id]=(void *) &entries[entry_size*((nz_bv_b<<6)+__ffsll(y)-1LU)];
                 lookup_hit_vec[pkt_id]=1;
             }
             return;
         }
+
         nz_bv_b+=blockDim.x;
-        __syncwarp(in_loop);
+        in_loop=__ballot_sync(in_loop, nz_bv_b<RTE_TABLE_NON_ZERO_BV_BS);
     }
 
     if(!threadIdx.x)

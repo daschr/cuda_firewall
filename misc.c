@@ -121,6 +121,7 @@ int setup_port( uint16_t port_id, struct rte_pktmbuf_extmem *ext_mem, struct rte
     rxconf.offloads=port_conf.rxmode.offloads;
 
     printf("[%u] rx_free_thresh: %u tx_free_thresh: %u\n", port_id, rxconf.rx_free_thresh, txconf.tx_free_thresh);
+    // maybe remove this
     rxconf.rx_free_thresh=256;
     txconf.tx_free_thresh=256;
     for(uint i=0; i<nb_tx_queues; ++i)

@@ -34,11 +34,11 @@ typedef struct {
 typedef struct {
     size_t num_ranges; // initial: 0
     size_t max_num_ranges;
-    size_t bv_bs; // initial: >= number of ranges>>5
+    size_t bv_bs; // initial: >= number of ranges/64
     uint32_t *ranges_from; // intial size: >= 2*(number of ranges)
     uint32_t *ranges_to; // intial size: >= 2*(number of ranges)
-    uint32_t *bvs; // initial size: >= bv_bs*2*(number of ranges)
-    uint32_t *non_zero_bvs; // initial size: >= bv_bs*2*(number of ranges)
+    uint64_t *bvs; // initial size: >= bv_bs*2*(number of ranges)
+    uint64_t *non_zero_bvs; // initial size: >= bv_bs*2*(number of ranges)
 } rte_bv_ranges_t;
 
 int rte_bv_markers_create(rte_bv_markers_t *markers);
