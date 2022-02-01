@@ -5,6 +5,9 @@ extern "C" {
 #include <stdlib.h>
 #include <stdio.h>
 #include <signal.h>
+#include <unistd.h>
+#include <time.h>
+#include <sys/time.h>
 
 #include <rte_common.h>
 #include <rte_log.h>
@@ -36,101 +39,153 @@ extern "C" {
 #include "parser.h"
 #include "config.h"
 #include "misc.h"
+#include "stats.h"
 
 #define RTE_LOGTYPE_APP RTE_LOGTYPE_USER1
+
+typedef struct {
+    void *table;
+    uint8_t *actions;
+    struct rte_ether_addr *tap_macaddr;
+    stats_t *stats;
+} __rte_cache_aligned firewall_conf_t;
 
 struct rte_pktmbuf_extmem ext_mem;
 struct rte_mempool *mpool_payload;
 void *table;
 ruleset_t ruleset;
 uint16_t tap_port_id, trunk_port_id;
+unsigned long timestamp;
+
+stats_t *old_port_stats=NULL, *port_stats=NULL;
+
+firewall_conf_t fw_conf;
 
 volatile uint8_t running;
 
 void exit_handler(int e) {
     running=0;
-    printf("[exit_handler] waiting for lcore 1...\n");
-    rte_eal_wait_lcore(1);
-    puts("lcore 1 stopped...");
+
+    rte_eal_mp_wait_lcore();
+
+    rte_table_bv_stop_kernel(table);
 
     free_ruleset(&ruleset);
 
     rte_table_bv_ops.f_free(table);
+
+    rte_free(port_stats);
+    rte_free(old_port_stats);
 
     rte_eal_cleanup();
 
     exit(EXIT_SUCCESS);
 }
 
-static __rte_noreturn void firewall(void *table, uint8_t *actions, struct rte_ether_addr *tap_macaddr) {
-    volatile uint64_t *lookup_hit_mask, *lookup_hit_mask_d, pkts_mask;
-    volatile uint32_t *positions, *positions_d;
+void print_stats(__rte_unused int e) {
+    struct timeval t;
+    gettimeofday(&t, NULL);
 
-    cudaHostAlloc((void **) &positions, sizeof(uint32_t)*BURST_SIZE, cudaHostAllocMapped);
-    cudaHostGetDevicePointer((void **) &positions_d, (uint32_t *) positions, 0);
+    unsigned long new_ts=1000000*t.tv_sec+t.tv_usec;
+    double ts_d=(double) (new_ts-timestamp)/1000000.0;
 
-    cudaHostAlloc((void **) &lookup_hit_mask, sizeof(uint64_t), cudaHostAllocMapped);
-    cudaHostGetDevicePointer((void **) &lookup_hit_mask_d, (uint64_t *) lookup_hit_mask, 0);
+#define PPS(X, P) (((double) (port_stats[P].X-old_port_stats[P].X))/ts_d)
+    printf("[trunk] pkts_in: %.2lfpps pkts_out: %.2lfpps pkts_dropped: %.2lfpps pkts_accepted: %.2lfpps\n",
+           PPS(pkts_in, 0), PPS(pkts_out, 0), PPS(pkts_dropped, 0), PPS(pkts_accepted, 0));
+    old_port_stats[0]=port_stats[0];
 
-    struct rte_mbuf **bufs_rx;
-    struct rte_mbuf **bufs_rx_d;
-    cudaHostAlloc((void **) &bufs_rx, sizeof(struct rte_mbuf*)*BURST_SIZE, cudaHostAllocMapped);
-    cudaHostGetDevicePointer((void **) &bufs_rx_d, bufs_rx, 0);
-
-    struct rte_mbuf *bufs_tx[BURST_SIZE];
-
-    const int (*lookup) (void *, struct rte_mbuf **, uint64_t, uint64_t *, void **)=rte_table_bv_ops.f_lookup;
-
-    int16_t i,j;
-
-    *lookup_hit_mask=0;
-    for(;; *lookup_hit_mask=0) {
-        const uint16_t nb_rx = rte_eth_rx_burst(trunk_port_id, 0, bufs_rx, BURST_SIZE);
-
-        if(unlikely(nb_rx==0))
-            continue;
-
-        pkts_mask=(1<<nb_rx)-1;
-
-        lookup(table, bufs_rx_d, pkts_mask, (uint64_t *) lookup_hit_mask_d, (void **) positions_d);
-
-        i=0;
-        j=0;
-
-        for(; i<nb_rx; ++i) {
-            if(!(  (*lookup_hit_mask>>i)&1  &  (actions[positions[i]]==RULE_DROP) )) {
-                bufs_tx[j++]=bufs_rx[i];
-                if(tap_macaddr!=NULL)
-                    rte_memcpy(&(rte_pktmbuf_mtod(bufs_rx[i], struct rte_ether_hdr *)->dst_addr), tap_macaddr, 6);
-            }
-        }
-
-        const uint16_t nb_tx = rte_eth_tx_burst(tap_port_id, 0, bufs_tx, j);
-
-        if(unlikely(nb_tx<nb_rx)) {
-            for(uint16_t b=nb_tx; b<nb_rx; ++b)
-                rte_pktmbuf_free(bufs_rx[b]);
-        }
-    }
+    printf("[fw-tap] pkts_in: %.2lfpps pkts_out: %.2lfpps pkts_dropped: %.2lfpps pkts_accepted: %.2lfpps\n",
+           PPS(pkts_in, 1), PPS(pkts_out, 1), PPS(pkts_dropped, 1), PPS(pkts_accepted, 1));
+    old_port_stats[1]=port_stats[1];
+#undef PPS
 }
 
-static int tap_tx(__rte_unused void *arg) {
-    struct rte_mbuf *bufs_rx[BURST_SIZE];
+static int firewall(void *arg) {
+    firewall_conf_t *conf=(firewall_conf_t *) arg;
 
-    for(; running;) {
-        const uint16_t nb_rx = rte_eth_rx_burst(tap_port_id, 0, bufs_rx, BURST_SIZE);
+    const uint16_t queue_id=rte_lcore_id()>>1;
 
-        if(unlikely(nb_rx==0))
-            continue;
+    stats_t *stats=((stats_t *) conf->stats)+((rte_lcore_id()&1)^1);
 
-        const uint16_t nb_tx = rte_eth_tx_burst(trunk_port_id, 0, bufs_rx, nb_rx);
+    if(rte_lcore_id()&1) {
+        uint64_t lookup_hit_mask=0, pkts_mask;
+        volatile uint8_t **actions, **actions_d;
 
-        if(unlikely(nb_tx<nb_rx)) {
-            for(uint16_t b=nb_tx; b<nb_rx; ++b)
-                rte_pktmbuf_free(bufs_rx[b]);
+        cudaHostAlloc((void **) &actions, sizeof(uint8_t *)*BURST_SIZE, cudaHostAllocMapped);
+        cudaHostGetDevicePointer((void **) &actions_d, (uint8_t **) actions, 0);
+
+        struct rte_mbuf **bufs_rx;
+        struct rte_mbuf **bufs_rx_d;
+        cudaHostAlloc((void **) &bufs_rx, sizeof(struct rte_mbuf*)*BURST_SIZE, cudaHostAllocMapped);
+        cudaHostGetDevicePointer((void **) &bufs_rx_d, bufs_rx, 0);
+
+        const int (*lookup) (void *, struct rte_mbuf **, uint64_t, uint64_t *, void **)=rte_table_bv_ops.f_lookup;
+
+        struct rte_mbuf *bufs_tx[BURST_SIZE];
+
+        int16_t i,j;
+
+        for(; likely(running); lookup_hit_mask=0) {
+            const uint16_t nb_rx = rte_eth_rx_burst(trunk_port_id, queue_id, bufs_rx, BURST_SIZE);
+
+            if(unlikely(nb_rx==0))
+                continue;
+
+            pkts_mask=nb_rx==64?UINT64_MAX:((1LU<<nb_rx)-1);
+
+            lookup(conf->table, bufs_rx_d, pkts_mask, &lookup_hit_mask, (void **) actions_d);
+
+            i=0;
+            j=0;
+
+            for(; i<nb_rx; ++i) {
+                if(unlikely(!((lookup_hit_mask>>i)&1))) {
+                    bufs_tx[j++]=bufs_rx[i];
+                    if(conf->tap_macaddr!=NULL)
+                        rte_memcpy(&(rte_pktmbuf_mtod(bufs_rx[i], struct rte_ether_hdr *)->dst_addr), conf->tap_macaddr, 6);
+
+                    continue;
+                }
+
+                if(unlikely(*(actions[i])==RULE_DROP)) {
+                    rte_pktmbuf_free(bufs_rx[i]);
+                    continue;
+                }
+
+                bufs_tx[j++]=bufs_rx[i];
+                if(conf->tap_macaddr!=NULL)
+                    rte_memcpy(&(rte_pktmbuf_mtod(bufs_rx[i], struct rte_ether_hdr *)->dst_addr), conf->tap_macaddr, 6);
+            }
+
+            const uint16_t nb_tx = rte_eth_tx_burst(tap_port_id, queue_id, bufs_tx, j);
+
+            stats->pkts_in+=nb_rx;
+            stats->pkts_out+=nb_tx;
+            stats->pkts_accepted+=j;
+            stats->pkts_dropped+=nb_rx-j;
+        }
+    } else {
+        struct rte_mbuf *bufs_rx[BURST_SIZE];
+
+        while(likely(running)) {
+            const uint16_t nb_rx = rte_eth_rx_burst(tap_port_id, queue_id, bufs_rx, BURST_SIZE);
+
+            if(unlikely(nb_rx==0))
+                continue;
+
+            const uint16_t nb_tx = rte_eth_tx_burst(trunk_port_id, queue_id, bufs_rx, nb_rx);
+
+            stats->pkts_in+=nb_rx;
+            stats->pkts_out+=nb_tx;
+
+            if(unlikely(nb_tx<nb_rx)) {
+                for(uint16_t b=nb_tx; b<nb_rx; ++b)
+                    rte_pktmbuf_free(bufs_rx[b]);
+            }
         }
     }
 
+    printf("%d stopped\n", rte_lcore_id());
     return 0;
 }
 
@@ -138,9 +193,9 @@ static uint8_t find_tap_trunk_devs(uint16_t *tap_id, uint16_t *trunk_id) {
     struct rte_eth_dev_info dev_info;
     uint8_t found_ports=0, avail_eths=rte_eth_dev_count_avail();
 
-    for(uint32_t id=0; id<avail_eths&found_ports!=3; ++id) {
+    for(uint32_t id=0; id<avail_eths&&found_ports!=3; ++id) {
         rte_eth_dev_info_get(id, &dev_info);
-        if(strcmp(dev_info.driver_name, "net_tap")==0&!(found_ports&1)) {
+        if(strcmp(dev_info.driver_name, "net_tap")==0&&!(found_ports&1)) {
             *tap_id=id;
             found_ports|=1;
         } else if((~found_ports)&2) {
@@ -154,14 +209,19 @@ static uint8_t find_tap_trunk_devs(uint16_t *tap_id, uint16_t *trunk_id) {
 
 int main(int ac, char *as[]) {
     running=1;
+
     if(ac==1) {
         fprintf(stderr, "Usage: %s [rules]\n", as[0]);
         return EXIT_FAILURE;
     }
 
+    struct timeval t;
+    gettimeofday(&t, NULL);
+    timestamp=1000000*t.tv_sec+t.tv_usec;
+
     signal(SIGINT, exit_handler);
     signal(SIGKILL, exit_handler);
-    signal(SIGSEGV, exit_handler);
+    signal(SIGUSR1, print_stats);
 
     int offset;
 
@@ -192,10 +252,26 @@ int main(int ac, char *as[]) {
         return EXIT_FAILURE;
     }
 
-    if(setup_port(trunk_port_id, &ext_mem, mpool_payload)|setup_port(tap_port_id, &ext_mem, mpool_payload)) {
+#define RX_OC(X) RTE_ETH_RX_OFFLOAD_##X
+#define TX_OC(X) RTE_ETH_TX_OFFLOAD_##X
+
+    if(setup_port(trunk_port_id, &ext_mem, mpool_payload, DEFAULT_NB_QUEUES, DEFAULT_NB_QUEUES,
+                  RX_OC(IPV4_CKSUM)|RX_OC(TCP_CKSUM)|RX_OC(UDP_CKSUM),
+                  TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM))
+            |setup_port(tap_port_id, &ext_mem, mpool_payload, DEFAULT_NB_QUEUES, DEFAULT_NB_QUEUES,
+                        RX_OC(IPV4_CKSUM)|RX_OC(TCP_CKSUM)|RX_OC(UDP_CKSUM),
+                        TX_OC(IPV4_CKSUM)|TX_OC(TCP_CKSUM)|TX_OC(UDP_CKSUM))) {
         rte_eal_cleanup();
         return EXIT_FAILURE;
     }
+
+#undef RX_OC
+#undef TX_OC
+
+    port_stats=rte_malloc("port_stats", sizeof(stats_t)*2, 0);
+    old_port_stats=rte_malloc("old_port_stats", sizeof(stats_t)*2, 0);
+    memset(port_stats, 0, sizeof(stats_t)*2);
+    memset(old_port_stats, 0, sizeof(stats_t)*2);
 
     memset(&ruleset, 0, sizeof(ruleset_t));
 
@@ -230,22 +306,47 @@ int main(int ac, char *as[]) {
         fdefs[i].size=fdefs_sizes[i];
     }
 
-    struct rte_table_bv_params table_params = { .num_fields=5, .field_defs=fdefs };
+    struct rte_table_bv_params table_params = { .num_fields=5, .field_defs=fdefs, .num_rules=ruleset.num_rules };
 
-    void *table=rte_table_bv_ops.f_create(&table_params, rte_socket_id(), 0);
+    table=rte_table_bv_ops.f_create(&table_params, rte_socket_id(), 1);
 
     if(table==NULL)
         goto err;
 
-    rte_table_bv_ops.f_add_bulk(table, (void **) ruleset.rules, NULL, ruleset.num_rules, NULL, NULL);
-    rte_table_bv_start_kernel(table);
+    uint8_t **actions=rte_malloc("actions", ruleset.num_rules*sizeof(uint8_t *), sizeof(uint8_t *));
+    for(uint32_t i=0; i<ruleset.num_rules; ++i)
+        actions[i]=&ruleset.actions[i];
+
+    if(rte_table_bv_ops.f_add_bulk(table, (void **) ruleset.rules, (void **) actions, ruleset.num_rules, NULL, NULL))
+        goto err;
+
+    rte_free(actions);
 
     free_ruleset_except_actions(&ruleset);
 
-    rte_eal_wait_lcore(1);
-    rte_eal_remote_launch(tap_tx, NULL, 1);
+    printf("starting kernel\n");
+    rte_table_bv_start_kernel(table);
+    printf("done starting kernel\n");
 
-    firewall(table, ruleset.actions, &tap_macaddr);
+    fw_conf=(firewall_conf_t) {
+        .table=table, .actions=ruleset.actions, .tap_macaddr=&tap_macaddr, .stats=port_stats
+    };
+
+    uint16_t coreid=rte_get_next_lcore(rte_get_main_lcore(), 1, 1);
+
+    for(int16_t i=0; i<DEFAULT_NB_QUEUES-1; ++i) {
+        coreid=rte_get_next_lcore(coreid, 1, 1);
+        rte_eal_remote_launch(firewall, &fw_conf, coreid);
+        coreid=rte_get_next_lcore(coreid, 1, 1);
+        rte_eal_remote_launch(firewall, &fw_conf, coreid);
+    }
+
+    coreid=rte_get_next_lcore(rte_get_main_lcore(), 1, 1);
+    rte_eal_remote_launch(firewall, &fw_conf, coreid);
+
+    firewall(&fw_conf);
+
+    rte_eal_mp_wait_lcore();
 
     rte_table_bv_ops.f_free(table);
 
@@ -257,6 +358,7 @@ int main(int ac, char *as[]) {
 err:
     free_ruleset(&ruleset);
     rte_eal_cleanup();
+    free(port_stats);
     return EXIT_FAILURE;
 }
 
