@@ -314,7 +314,7 @@ int main(int ac, char *as[]) {
 
     struct rte_table_bv_params table_params = { .num_fields=5, .field_defs=fdefs, .num_rules=ruleset.num_rules };
 
-    void *table=rte_table_bv_ops.f_create(&table_params, rte_socket_id(), 1);
+    table=rte_table_bv_ops.f_create(&table_params, rte_socket_id(), 1);
 
     if(table==NULL)
         goto err;
