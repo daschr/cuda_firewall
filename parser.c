@@ -60,18 +60,23 @@ bool parse_ruleset(ruleset_t *ruleset, const char *file) {
                   &ip_buf[5], &ip_buf[6], &ip_buf[7], &ip_buf[8], &ip_buf[9],
                   v_buf[0], v_buf[1], v_buf[2], command)==14) {
 
+            if(parse_range(v_buf[2], ruleset->rules[ruleset->num_rules]->buf)) {
+                fprintf(stderr, "ERROR: could not parse range: \"%s\"\n", v_buf[2]);
+                goto failure;
+            }
+
             // src ipv4 range
-            ruleset->rules[ruleset->num_rules]->buf[0]=(((ip_buf[0]<<24)+(ip_buf[1]<<16)+(ip_buf[2]<<8)+ip_buf[3])>>(32-ip_buf[4]))
+            ruleset->rules[ruleset->num_rules]->buf[2]=(((ip_buf[0]<<24)+(ip_buf[1]<<16)+(ip_buf[2]<<8)+ip_buf[3])>>(32-ip_buf[4]))
                     <<(32-ip_buf[4]);
-            ruleset->rules[ruleset->num_rules]->buf[1]=ruleset->rules[ruleset->num_rules]->buf[0]|(UINT32_MAX>>ip_buf[4]);
+            ruleset->rules[ruleset->num_rules]->buf[3]=ruleset->rules[ruleset->num_rules]->buf[2]|(UINT32_MAX>>ip_buf[4]);
 
             // dst ipv4 range
-            ruleset->rules[ruleset->num_rules]->buf[2]=(((ip_buf[5]<<24)+(ip_buf[6]<<16)+(ip_buf[7]<<8)+ip_buf[8])>>(32-ip_buf[9]))
+            ruleset->rules[ruleset->num_rules]->buf[4]=(((ip_buf[5]<<24)+(ip_buf[6]<<16)+(ip_buf[7]<<8)+ip_buf[8])>>(32-ip_buf[9]))
                     <<(32-ip_buf[9]);
-            ruleset->rules[ruleset->num_rules]->buf[3]=ruleset->rules[ruleset->num_rules]->buf[2]|(UINT32_MAX>>ip_buf[9]);
+            ruleset->rules[ruleset->num_rules]->buf[5]=ruleset->rules[ruleset->num_rules]->buf[4]|(UINT32_MAX>>ip_buf[9]);
 
-            for(int i=0; i<3; ++i) {
-                if(parse_range(v_buf[i], ruleset->rules[ruleset->num_rules]->buf+4+(i<<1))) {
+            for(int i=0; i<2; ++i) {
+                if(parse_range(v_buf[i], ruleset->rules[ruleset->num_rules]->buf+6+(i<<1))) {
                     fprintf(stderr, "ERROR: could not parse range: \"%s\"\n", v_buf[i]);
                     goto failure;
                 }

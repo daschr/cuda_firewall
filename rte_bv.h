@@ -8,7 +8,7 @@ extern "C" {
 #include <stdint.h>
 #include <rte_hash.h>
 
-#define RTE_BV_MARKERS_MAX_ENTRIES 100000ULL
+#define RTE_BV_MARKERS_MAX_ENTRIES 150000ULL
 #define RTE_BV_MARKERS_LIST_STND_SIZE 2ULL
 
 typedef struct {
@@ -26,6 +26,7 @@ typedef struct {
 typedef struct {
     uint32_t max_value;
     size_t num_lists;
+	rte_bv_marker_list_t *initial_list;
     struct rte_hash *table;
 } rte_bv_markers_t;
 
@@ -33,10 +34,11 @@ typedef struct {
 typedef struct {
     size_t num_ranges; // initial: 0
     size_t max_num_ranges;
-    size_t bv_bs; // initial: >= number of ranges>>5
+    size_t bv_bs; // initial: >= number of ranges/64
     uint32_t *ranges_from; // intial size: >= 2*(number of ranges)
     uint32_t *ranges_to; // intial size: >= 2*(number of ranges)
-    uint32_t *bvs; // initial size: >= bv_bs*2*(number of ranges)
+    uint64_t *bvs; // initial size: >= bv_bs*2*(number of ranges)
+    uint64_t *non_zero_bvs; // initial size: >= bv_bs*2*(number of ranges)
 } rte_bv_ranges_t;
 
 int rte_bv_markers_create(rte_bv_markers_t *markers);

@@ -10,10 +10,13 @@ extern "C" {
 #include "rte_bv.h"
 #include <rte_table.h>
 
+#include <cuda_runtime.h>
+
 #define RTE_TABLE_BV_MAX_RANGES ((size_t) (RTE_BV_MARKERS_MAX_ENTRIES>>1))
-#define RTE_TABLE_BV_BS        ((size_t) (RTE_TABLE_BV_MAX_RANGES>>5))
+#define RTE_TABLE_BV_BS	((size_t) (RTE_TABLE_BV_MAX_RANGES>>6)+1)
+#define RTE_TABLE_NON_ZERO_BV_BS ((size_t) (((RTE_TABLE_BV_MAX_RANGES>>6)+1)>>6)+1)
+#define RTE_TABLE_BV_MAX_PKTS 1024
 #define RTE_TABLE_BV_MAX_FIELDS 24
-#define RTE_TABLE_BV_MAX_PKTS 64
 
 enum {
     RTE_TABLE_BV_FIELD_TYPE_RANGE,
@@ -22,7 +25,6 @@ enum {
 
 struct rte_table_bv_field_def {
     uint32_t offset; // offset from data start
-    uint32_t ptype_mask; // packet type mask needed for matching
 
     uint8_t type;
     uint8_t size; // in bytes
@@ -35,7 +37,8 @@ struct rte_table_bv_field {
 
 struct rte_table_bv_params {
     uint32_t num_fields;
-    uint32_t num_rules;
+    uint32_t num_rules; // max number of rules
+
     // size needs to be  >=num_fields
     const struct rte_table_bv_field_def *field_defs;
 };
@@ -46,6 +49,10 @@ struct rte_table_bv_key {
 };
 
 extern struct rte_table_ops rte_table_bv_ops;
+
+int rte_table_bv_lookup_burst(void *t_r, uint8_t *lookup_hit_vec,
+                               struct rte_mbuf **pkts, uint32_t num_pkts, void **e);
+
 
 int rte_table_bv_start_kernel(void *t_r);
 int rte_table_bv_stop_kernel(void *t_r);
