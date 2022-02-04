@@ -401,7 +401,7 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
     if(pkt_id>=num_pkts)
         return;
 
-    __shared__ uint64_t *__restrict__ bv[32][32];
+    __shared__ uint64_t *__restrict__ bv[32][RTE_TABLE_BV_MAX_FIELDS];
     __shared__ uint64_t *__restrict__ non_zero_bv[32][RTE_TABLE_BV_MAX_FIELDS];
     const uint8_t field_size=sizes[field_id];
     const uint8_t comp_level=compression_level[field_size];
