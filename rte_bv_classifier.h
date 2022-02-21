@@ -14,12 +14,13 @@ extern "C" {
 #include <cuda_runtime.h>
 
 #define RTE_BV_CLASSIFIER_MAX_RANGES ((size_t) (RTE_BV_MARKERS_MAX_ENTRIES>>1))
-#define RTE_BV_CLASSIFIER_BS	((size_t) (RTE_BV_CLASSIFIER_MAX_RANGES>>5))
-#define RTE_BV_CLASSIFIER_MAX_PKTS 64
+#define RTE_BV_CLASSIFIER_BV_BS	((size_t) (RTE_BV_CLASSIFIER_MAX_RANGES>>6)+1)
+#define RTE_BV_CLASSIFIER_NON_ZERO_BV_BS ((size_t) (((RTE_BV_CLASSIFIER_MAX_RANGES>>6)+1)>>6)+1)
+#define RTE_BV_CLASSIFIER_MAX_PKTS 128
 #define RTE_BV_CLASSIFIER_MAX_FIELDS 24
 
-#define RTE_BV_CLASSIFIER_NUM_STREAMS 256
-#define RTE_BV_CLASSIFIER_NUM_STREAMS_MASK 255
+#define RTE_BV_CLASSIFIER_NUM_STREAMS 64
+#define RTE_BV_CLASSIFIER_NUM_STREAMS_MASK 63
 
 enum {
     RTE_BV_CLASSIFIER_FIELD_TYPE_RANGE,
@@ -57,18 +58,21 @@ struct rte_bv_classifier {
     struct rte_table_stats stats;
     const struct rte_bv_classifier_field_def *field_defs;
 
-    uint32_t ptype_mask;
+	uint32_t packets_per_block;
+
     uint32_t num_rules;
     uint32_t entry_size;
     uint8_t *entries;
 
     uint32_t **ranges_from; // size==[num_fields][2*RTE_BV_CLASSIFIER_MAX_RANGES]
     uint32_t **ranges_to; // size==[num_fields][2*RTE_BV_CLASSIFIER_MAX_RANGES]
-    uint32_t **bvs; // size==[num_fields][RTE_BV_CLASSIFIER_BS*2*RTE_BV_CLASSIFIER_MAX_RANGES]
+    uint64_t **bvs; // size==[num_fields][RTE_BV_CLASSIFIER_BS*2*RTE_BV_CLASSIFIER_MAX_RANGES]
+    uint64_t **non_zero_bvs; // size==[num_fields][RTE_BV_CLASSIFIER_BS*2*RTE_BV_CLASSIFIER_MAX_RANGES]
 
     uint32_t **ranges_from_dev;
     uint32_t **ranges_to_dev;
-    uint32_t **bvs_dev;
+    uint64_t **bvs_dev;
+    uint64_t **non_zero_bvs_dev;
 
     size_t *num_ranges;
     uint32_t *field_offsets;
@@ -80,13 +84,13 @@ struct rte_bv_classifier {
     void **matched_entries[RTE_BV_CLASSIFIER_NUM_STREAMS];
     void **matched_entries_h[RTE_BV_CLASSIFIER_NUM_STREAMS];
 
-    uint64_t *lookup_hit_mask;
-    uint64_t *lookup_hit_mask_h;
+	uint8_t *lookup_hit_vec[RTE_BV_CLASSIFIER_NUM_STREAMS];
+	uint8_t *lookup_hit_vec_h[RTE_BV_CLASSIFIER_NUM_STREAMS];
 
     rte_bv_markers_t *bv_markers; // size==num_fields
 
     struct rte_mbuf **pkts[RTE_BV_CLASSIFIER_NUM_STREAMS];
-    uint64_t pkts_mask[RTE_BV_CLASSIFIER_NUM_STREAMS];
+    uint16_t n_pkts_in[RTE_BV_CLASSIFIER_NUM_STREAMS];
 
     size_t enqueue_pos;
     size_t dequeue_pos;
@@ -104,8 +108,8 @@ int rte_bv_classifier_entry_delete(struct rte_bv_classifier *c, struct rte_bv_cl
 int rte_bv_classifier_entry_add_bulk(struct rte_bv_classifier *c, struct rte_bv_classifier_key **ks, void **es_r, uint32_t n_keys, int *key_found, __rte_unused void **e_ptr);
 int rte_bv_classifier_entry_delete_bulk(struct rte_bv_classifier *c, struct rte_bv_classifier_key **ks, uint32_t n_keys, int *key_found, __rte_unused void **es_r);
 
-void rte_bv_classifier_enqueue_burst(struct rte_bv_classifier *c, struct rte_mbuf **pkts, uint64_t pkts_mask);
-void __rte_noreturn rte_bv_classifier_poll_lookups(struct rte_bv_classifier *c, void (*callback) (struct rte_mbuf **, uint64_t,  uint64_t, void **, void *), void *p);
+void rte_bv_classifier_enqueue_burst(struct rte_bv_classifier *c, struct rte_mbuf **pkts, uint16_t n_pkts_in);
+void __rte_noreturn rte_bv_classifier_poll_lookups(struct rte_bv_classifier *c, void (*callback) (struct rte_mbuf **, uint16_t,  uint8_t *, void **, void *), void *p);
 
 int rte_bv_classifier_stats_read(struct rte_bv_classifier *c, struct rte_table_stats *stats, int clear);
 
