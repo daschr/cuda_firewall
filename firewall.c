@@ -155,7 +155,6 @@ static int firewall(void *arg) {
 
             for(; i<nb_rx; ++i) {
                 if(unlikely(!lookup_hit_vec[i])) {
-                    printf("lookup_hit_vec[%u]==0\n", i);
                     bufs_tx[j++]=bufs_rx[i];
                     if(conf->tap_macaddr!=NULL)
                         rte_memcpy(&(rte_pktmbuf_mtod(bufs_rx[i], struct rte_ether_hdr *)->dst_addr), conf->tap_macaddr, 6);
