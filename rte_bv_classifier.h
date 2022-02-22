@@ -16,11 +16,11 @@ extern "C" {
 #define RTE_BV_CLASSIFIER_MAX_RANGES ((size_t) (RTE_BV_MARKERS_MAX_ENTRIES>>1))
 #define RTE_BV_CLASSIFIER_BV_BS	((size_t) (RTE_BV_CLASSIFIER_MAX_RANGES>>6)+1)
 #define RTE_BV_CLASSIFIER_NON_ZERO_BV_BS ((size_t) (((RTE_BV_CLASSIFIER_MAX_RANGES>>6)+1)>>6)+1)
-#define RTE_BV_CLASSIFIER_MAX_PKTS 128
+#define RTE_BV_CLASSIFIER_MAX_PKTS 64
 #define RTE_BV_CLASSIFIER_MAX_FIELDS 24
 
-#define RTE_BV_CLASSIFIER_NUM_STREAMS 64
-#define RTE_BV_CLASSIFIER_NUM_STREAMS_MASK 63
+#define RTE_BV_CLASSIFIER_NUM_STREAMS 8
+#define RTE_BV_CLASSIFIER_NUM_STREAMS_MASK 7
 
 enum {
     RTE_BV_CLASSIFIER_FIELD_TYPE_RANGE,
@@ -58,6 +58,7 @@ struct rte_bv_classifier {
     struct rte_table_stats stats;
     const struct rte_bv_classifier_field_def *field_defs;
 
+	size_t bvs_size;
 	uint32_t packets_per_block;
 
     uint32_t num_rules;

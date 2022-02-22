@@ -79,6 +79,7 @@ struct rte_bv_classifier *rte_bv_classifier_create(struct rte_bv_classifier_para
 
     c->num_fields=p->num_fields;
     c->packets_per_block=32/p->num_fields;
+    c->bvs_size=sizeof(uint64_t *)*c->packets_per_block*RTE_BV_CLASSIFIER_MAX_FIELDS*2;
 
     c->field_defs=p->field_defs;
     c->num_rules=p->num_rules;
@@ -122,7 +123,7 @@ struct rte_bv_classifier *rte_bv_classifier_create(struct rte_bv_classifier_para
         CHECK(cudaMemcpy(c->field_offsets+i, &c->field_defs[i].offset, sizeof(uint32_t), cudaMemcpyHostToDevice));
         CHECK(cudaMemcpy(c->field_sizes+i, &c->field_defs[i].size, sizeof(uint32_t), cudaMemcpyHostToDevice));
 
-		#define RANGE_SIZE(DIV) ((sizeof(uint32_t)*((size_t) RTE_BV_CLASSIFIER_MAX_RANGES))/DIV+1LU)
+#define RANGE_SIZE(DIV) ((sizeof(uint32_t)*((size_t) RTE_BV_CLASSIFIER_MAX_RANGES))/DIV+1LU)
         switch(p->field_defs[i].size) {
         case 4:
             CHECK(cudaMalloc((void **) &c->ranges_from[i], RANGE_SIZE(1LU)));
@@ -142,7 +143,7 @@ struct rte_bv_classifier *rte_bv_classifier_create(struct rte_bv_classifier_para
         default:
             printf("unkown field_def[%lu] size: %hhu\n", i, p->field_defs[i].size);
         }
-		#undef RANGE_SIZE
+#undef RANGE_SIZE
 
         printf("size: bvs[%lu] %lu bytes\n", i, sizeof(uint64_t)*((size_t) RTE_BV_CLASSIFIER_BV_BS) * ((size_t ) RTE_BV_CLASSIFIER_MAX_RANGES));
         CHECK(cudaMalloc((void **) &c->bvs[i], sizeof(uint64_t)*((size_t) RTE_BV_CLASSIFIER_BV_BS) * ((size_t ) RTE_BV_CLASSIFIER_MAX_RANGES)));
@@ -363,14 +364,16 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
                             const uint16_t num_pkts, uint8_t *__restrict__ *__restrict__ pkts,
                             void *__restrict__ *matched_entries, uint8_t *__restrict__ lookup_hit_vec) {
 
+    extern __shared__ uint8_t mem[];
+
 #define field_id threadIdx.z
 
     const int pkt_id=blockDim.y*blockIdx.x+threadIdx.y;
     if(pkt_id>=num_pkts)
         return;
 
-    __shared__ uint64_t *__restrict__ bv[32][RTE_BV_CLASSIFIER_MAX_FIELDS];
-    __shared__ uint64_t *__restrict__ non_zero_bv[32][RTE_BV_CLASSIFIER_MAX_FIELDS];
+    uint64_t *(*bv)[RTE_BV_CLASSIFIER_MAX_FIELDS]=(uint64_t *(*)[RTE_BV_CLASSIFIER_MAX_FIELDS]) mem;
+    uint64_t *(*non_zero_bv)[RTE_BV_CLASSIFIER_MAX_FIELDS]=(uint64_t *(*)[RTE_BV_CLASSIFIER_MAX_FIELDS]) (mem+(sizeof(uint64_t *)*blockDim.y*RTE_BV_CLASSIFIER_MAX_FIELDS));
     const uint8_t field_size=sizes[field_id];
     const uint8_t comp_level=compression_level[field_size];
 
@@ -508,7 +511,7 @@ void rte_bv_classifier_enqueue_burst(struct rte_bv_classifier *c, struct rte_mbu
         c->pkts_data_h[epos][i]=rte_pktmbuf_mtod(pkts[i], uint8_t *);
     }
 
-    bv_search<<<(n_pkts_in/c->packets_per_block)+1, dim3{WORKERS_PER_FIELD, c->packets_per_block, c->num_fields}, 0, c->streams[epos]>>>(
+    bv_search<<<(n_pkts_in/c->packets_per_block)+1, dim3{WORKERS_PER_FIELD, c->packets_per_block, c->num_fields}, c->bvs_size, c->streams[epos]>>>(
         c->ranges_from_dev, c->ranges_to_dev, c->num_ranges,
         c->field_offsets, c->field_sizes,
         c->bvs_dev, c->non_zero_bvs_dev, c->num_fields, c->entry_size, c->entries,
