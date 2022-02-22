@@ -110,6 +110,7 @@ void print_stats(__rte_unused int e) {
            PPS(pkts_in, 1), PPS(pkts_out, 1), PPS(pkts_dropped, 1), PPS(pkts_accepted, 1));
     old_port_stats[1]=port_stats[1];
 #undef PPS
+	timestamp=new_ts;
 }
 
 static int firewall(void *arg) {
