@@ -139,7 +139,7 @@ static void *rte_table_bv_create(void *params, int socket_id, uint32_t entry_siz
     t->num_fields=p->num_fields;
     t->packets_per_block=PERSISTENT_WARPS_PER_THREAD;
     t->num_blocks=ceil((double) RTE_TABLE_BV_MAX_PKTS/(double) PERSISTENT_WARPS_PER_THREAD)<28?ceil((double) RTE_TABLE_BV_MAX_PKTS/ (double) (double)  PERSISTENT_WARPS_PER_THREAD):NUM_MULTIPROCESSORS;
-	printf("num_blocks: %u packets_per_block: %u\n", t->num_blocks, t->packets_per_block);
+    printf("num_blocks: %u packets_per_block: %u\n", t->num_blocks, t->packets_per_block);
 
     t->field_defs=p->field_defs;
     t->num_rules=p->num_rules;
@@ -165,9 +165,9 @@ static void *rte_table_bv_create(void *params, int socket_id, uint32_t entry_siz
 
 #undef HOSTALLOC
 
-	*t->num_pkts_h=0;
-	*t->num_done_pkts_h=0;
-	*t->running_h=1;	
+    *t->num_pkts_h=0;
+    *t->num_done_pkts_h=0;
+    *t->running_h=1;
 
     CHECK(cudaHostAlloc((void **) &t->pkts_data_h, sizeof(uint8_t*)*RTE_TABLE_BV_MAX_PKTS, cudaHostAllocMapped|cudaHostAllocWriteCombined));
     CHECK(cudaHostGetDevicePointer((void **) &t->pkts_data, t->pkts_data_h, 0));
@@ -447,22 +447,22 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
     __shared__ uint8_t comp_levels[RTE_TABLE_BV_MAX_FIELDS];
     if(!threadIdx.y&&threadIdx.x<num_fields) {
         field_sizes[threadIdx.x]=sizes[threadIdx.x];
-		comp_levels[threadIdx.x]=compression_levels[sizes[threadIdx.x]];
-	}
+        comp_levels[threadIdx.x]=compression_levels[sizes[threadIdx.x]];
+    }
 
     __shared__ uint c_num_pkts;
     __shared__ uint c_num_done_pkts;
     __shared__ uint8_t stop;
-	
-	if(!(threadIdx.x|threadIdx.y))
-			stop=0;
+
+    if(!(threadIdx.x|threadIdx.y))
+        stop=0;
 
     while(1) {
         if(!(threadIdx.x|threadIdx.y)) {
             while(*running & ((blockDim.y*blockIdx.x+threadIdx.y)>=*num_pkts));
-            if(!*running){
+            if(!*running) {
                 stop=1;
-			}
+            }
 
             c_num_pkts=*num_pkts;
             c_num_done_pkts=0;
@@ -478,8 +478,8 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
                 uint v;
                 if(!threadIdx.x) {
                     bv[threadIdx.y][field_id]=NULL;
-					uint8_t *pkt=(uint8_t * ) pkts[pkt_id]+offsets[field_id];
-					switch(sizes[field_id]) {
+                    uint8_t *pkt=(uint8_t * ) pkts[pkt_id]+offsets[field_id];
+                    switch(sizes[field_id]) {
                     case 1:
                         v=(*pkt<<24)|(*pkt<<16)|(*pkt<<8)|*pkt;
                         break;
@@ -527,24 +527,18 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
 
                     __syncwarp();
                 }
+
                 offset=start+threadIdx.x;
+
                 lres=offset<num_ranges[field_id]?leu(ranges_from[field_id][offset],v,field_sizes[field_id]):0;
                 rres=offset<num_ranges[field_id]?leu(v,ranges_to[field_id][offset],field_sizes[field_id]):0;
 
-                __syncwarp();
-
-                l=__ballot_sync(UINT32_MAX, lres);
-                r=__ballot_sync(UINT32_MAX, rres);
-                if(l&r) {
-                    if((__ffs(l&r)-1)==threadIdx.x) {
-                        if(lres&rres) {
-                            const long pos=(offset<<comp_levels[field_id])|leu_offset(lres&rres, field_sizes[field_id]);
-                            bv[threadIdx.y][field_id]=bvs[field_id]+pos*RTE_TABLE_BV_BS;
-                            non_zero_bv[threadIdx.y][field_id]=non_zero_bvs[field_id]+pos*RTE_TABLE_NON_ZERO_BV_BS;
-                        }
-                    }
-                    __syncwarp();
+                if(lres&rres) {
+                    const long pos=(offset<<comp_levels[field_id])|leu_offset(lres&rres, field_sizes[field_id]);
+                    bv[threadIdx.y][field_id]=bvs[field_id]+pos*RTE_TABLE_BV_BS;
+                    non_zero_bv[threadIdx.y][field_id]=non_zero_bvs[field_id]+pos*RTE_TABLE_NON_ZERO_BV_BS;
                 }
+                __syncwarp();
 found_bv:
                 ++field_id;
                 __syncwarp();
@@ -587,7 +581,7 @@ found_bv:
                 const uint32_t tm=__ballot_sync(in_loop, __ffsll(y));
                 if(tm) {
                     if((__ffs(tm)-1)==threadIdx.x) {
-						matched_entries[pkt_id]=(void *) &entries[entry_size*((nz_bv_b<<6)+__ffsll(y)-1LU)];
+                        matched_entries[pkt_id]=(void *) &entries[entry_size*((nz_bv_b<<6)+__ffsll(y)-1LU)];
                         lookup_hit_vec[pkt_id]=1;
                         atomicAdd(&c_num_done_pkts, 1);
                     }
@@ -598,10 +592,10 @@ found_bv:
                 in_loop=__ballot_sync(in_loop, nz_bv_b<RTE_TABLE_NON_ZERO_BV_BS);
             }
 
-            if(!threadIdx.x){
+            if(!threadIdx.x) {
                 lookup_hit_vec[pkt_id]=0;
                 atomicAdd(&c_num_done_pkts, 1);
-			}
+            }
 
 found_rule:
             __syncwarp();
@@ -682,7 +676,7 @@ int rte_table_bv_lookup_burst(void *t_r, uint8_t *lookup_hit_vec,
     while(ONCE(*t->num_done_pkts)!=num_pkts);
 
     memcpy(e, (const void *) t->matched_entries_h, sizeof(void *)*num_pkts);
-	memcpy(lookup_hit_vec, t->lookup_hit_vec_h, sizeof(uint8_t)*num_pkts);
+    memcpy(lookup_hit_vec, t->lookup_hit_vec_h, sizeof(uint8_t)*num_pkts);
 
 #ifdef MEASURE_TIME
     gettimeofday(&k_t2, NULL);
@@ -701,7 +695,7 @@ static int rte_table_bv_lookup(void *t_r, struct rte_mbuf **pkts, uint64_t pkts_
     const uint32_t num_pkts=__builtin_popcountll(pkts_mask);
     RTE_TABLE_BV_STATS_PKTS_IN_ADD(t, n_pkts_in);
 
-	for(uint64_t i=0; i<num_pkts; ++i)
+    for(uint64_t i=0; i<num_pkts; ++i)
         t->pkts_data[i]=rte_pktmbuf_mtod(pkts[i], uint8_t *);
 
     ONCE(*t->num_done_pkts)=0;
