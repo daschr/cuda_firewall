@@ -164,7 +164,7 @@ static int firewall(void *arg) {
                     continue;
                 }
 
-                if(unlikely(*(actions[i])==RULE_DROP)) {
+                if(*(actions[i])==RULE_DROP) {
                     rte_pktmbuf_free(bufs_rx[i]);
                     continue;
                 }
