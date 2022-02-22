@@ -36,6 +36,7 @@ extern "C" {
 #include "parser.h"
 #include "config.h"
 #include "misc.h"
+#include "stats.h"
 
 #define RTE_LOGTYPE_APP RTE_LOGTYPE_USER1
 
@@ -46,6 +47,9 @@ ruleset_t ruleset;
 uint16_t tap_port_id, trunk_port_id;
 
 volatile uint8_t running;
+
+unsigned long timestamp;
+stats_t *old_port_stats=NULL, *port_stats=NULL;
 
 typedef struct {
     struct rte_ether_addr *tap_macaddr;
@@ -65,9 +69,32 @@ void exit_handler(int e) {
 
     rte_bv_classifier_free(classifier);
 
+    rte_free(old_port_stats);
+    rte_free(port_stats);
+
     rte_eal_cleanup();
 
     exit(EXIT_SUCCESS);
+}
+
+void print_stats(__rte_unused int e) {
+    struct timeval t;
+    gettimeofday(&t, NULL);
+
+    unsigned long new_ts=1000000*t.tv_sec+t.tv_usec;
+    double ts_d=(double) (new_ts-timestamp)/1000000.0;
+
+#define PPS(X, P) (((double) (port_stats[P].X-old_port_stats[P].X))/ts_d)
+    printf("[trunk] pkts_in: %.2lfpps pkts_out: %.2lfpps pkts_dropped: %.2lfpps pkts_accepted: %.2lfpps pkts_lookup_hit_miss: %.2lfpps\n",
+           PPS(pkts_in, 0), PPS(pkts_out, 0), PPS(pkts_dropped, 0), PPS(pkts_accepted, 0), PPS(pkts_lookup_miss, 0));
+    old_port_stats[0]=port_stats[0];
+
+    printf("[fw-tap] pkts_in: %.2lfpps pkts_out: %.2lfpps pkts_dropped: %.2lfpps pkts_accepted: %.2lfpps pkts_lookup_miss: %.2lfpps\n",
+           PPS(pkts_in, 1), PPS(pkts_out, 1), PPS(pkts_dropped, 1), PPS(pkts_accepted, 1), PPS(pkts_lookup_miss, 1));
+    old_port_stats[1]=port_stats[1];
+#undef PPS
+
+    timestamp=new_ts;
 }
 
 void tx_callback(struct rte_mbuf **pkts, uint16_t nb_rx, uint8_t *lookup_hit_vec, void **actions_r, void *p_r) {
@@ -81,6 +108,7 @@ void tx_callback(struct rte_mbuf **pkts, uint16_t nb_rx, uint8_t *lookup_hit_vec
             bufs_tx[j++]=pkts[i];
             if(p->tap_macaddr)
                 rte_memcpy(&(rte_pktmbuf_mtod(pkts[i], struct rte_ether_hdr *)->dst_addr), p->tap_macaddr, 6);
+            port_stats->pkts_lookup_miss++;
             continue;
         }
 
@@ -94,7 +122,12 @@ void tx_callback(struct rte_mbuf **pkts, uint16_t nb_rx, uint8_t *lookup_hit_vec
             rte_memcpy(&(rte_pktmbuf_mtod(pkts[i], struct rte_ether_hdr *)->dst_addr), p->tap_macaddr, 6);
     }
 
-    rte_eth_tx_burst(tap_port_id, 0, bufs_tx, j);
+    const uint16_t nb_tx=rte_eth_tx_burst(tap_port_id, 0, bufs_tx, j);
+
+    port_stats->pkts_in+=nb_rx;
+    port_stats->pkts_out+=nb_tx;
+    port_stats->pkts_accepted+=j;
+    port_stats->pkts_dropped+=nb_rx-j;
 }
 
 int trunk_rx(void *arg) {
@@ -171,6 +204,7 @@ int main(int ac, char *as[]) {
         return EXIT_FAILURE;
     }
 
+    signal(SIGUSR1, print_stats);
     signal(SIGINT, exit_handler);
     signal(SIGKILL, exit_handler);
 //    signal(SIGSEGV, exit_handler);
@@ -219,6 +253,11 @@ int main(int ac, char *as[]) {
 
 #undef RX_OC
 #undef TX_OC
+
+    port_stats=rte_malloc("port_stats", sizeof(stats_t)*2, 0);
+    old_port_stats=rte_malloc("old_port_stats", sizeof(stats_t)*2, 0);
+    memset(port_stats, 0, sizeof(stats_t)*2);
+    memset(old_port_stats, 0, sizeof(stats_t)*2);
 
     memset(&ruleset, 0, sizeof(ruleset_t));
 
@@ -270,6 +309,10 @@ int main(int ac, char *as[]) {
         goto err;
 
     free_ruleset_except_actions(&ruleset);
+
+    struct timeval t;
+    gettimeofday(&t, NULL);
+    timestamp=1000000*t.tv_sec+t.tv_usec;
 
     trunk_tx_param_t trunk_tx_param= {.classifier=classifier, .tap_macaddr=&tap_macaddr};
     uint16_t coreid=rte_get_next_lcore(rte_get_main_lcore(), 1, 1);
