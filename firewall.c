@@ -66,11 +66,11 @@ volatile uint8_t running;
 
 void exit_handler(int e) {
     running=0;
-	
+
     rte_eal_mp_wait_lcore();
 
-	if(table)
-		rte_table_bv_stop_kernel(table);
+    if(table)
+        rte_table_bv_stop_kernel(table);
 
     free_ruleset(&ruleset);
 
@@ -100,6 +100,8 @@ void print_stats(__rte_unused int e) {
            PPS(pkts_in, 1), PPS(pkts_out, 1), PPS(pkts_dropped, 1), PPS(pkts_accepted, 1), PPS(pkts_lookup_miss, 1));
     old_port_stats[1]=port_stats[1];
 #undef PPS
+
+    timestamp=new_ts;
 }
 
 static int firewall(void *arg) {
@@ -153,8 +155,8 @@ static int firewall(void *arg) {
 
             for(; i<nb_rx; ++i) {
                 if(unlikely(!lookup_hit_vec[i])) {
-                	printf("lookup_hit_vec[%u]==0\n", i);
-					bufs_tx[j++]=bufs_rx[i];
+                    printf("lookup_hit_vec[%u]==0\n", i);
+                    bufs_tx[j++]=bufs_rx[i];
                     if(conf->tap_macaddr!=NULL)
                         rte_memcpy(&(rte_pktmbuf_mtod(bufs_rx[i], struct rte_ether_hdr *)->dst_addr), conf->tap_macaddr, 6);
 
@@ -334,7 +336,7 @@ int main(int ac, char *as[]) {
         .table=table, .actions=ruleset.actions, .tap_macaddr=&tap_macaddr, .stats=port_stats
     };
 
-	rte_table_bv_start_kernel(table);
+    rte_table_bv_start_kernel(table);
 
     uint16_t coreid=rte_get_next_lcore(rte_get_main_lcore(), 1, 1);
 
