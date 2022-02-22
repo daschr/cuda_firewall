@@ -96,6 +96,7 @@ static int rte_table_bv_free(void *t_r) {
     rte_free(t->ranges_from);
     rte_free(t->ranges_to);
     rte_free(t->bvs);
+    rte_free(t->non_zero_bvs);
 
     rte_free(t);
 
@@ -461,23 +462,16 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
         __syncwarp();
     }
     offset=start+threadIdx.x;
+
     lres=offset<num_ranges[field_id]?leu(ranges_from[field_id][offset],v,field_size):0;
     rres=offset<num_ranges[field_id]?leu(v,ranges_to[field_id][offset],field_size):0;
+    if(lres&rres) {
+        const long pos=(offset<<comp_level)|leu_offset(lres&rres, field_size);
+        bv[threadIdx.y][field_id]=bvs[field_id]+pos*RTE_TABLE_BV_BS;
+        non_zero_bv[threadIdx.y][field_id]=non_zero_bvs[field_id]+pos*RTE_TABLE_NON_ZERO_BV_BS;
+    }
 
     __syncwarp();
-
-    l=__ballot_sync(UINT32_MAX, lres);
-    r=__ballot_sync(UINT32_MAX, rres);
-    if(l&r) {
-        if((__ffs(l&r)-1)==threadIdx.x) {
-            if(lres&rres) {
-                const long pos=(offset<<comp_level)|leu_offset(lres&rres, field_size);
-                bv[threadIdx.y][field_id]=bvs[field_id]+pos*RTE_TABLE_BV_BS;
-                non_zero_bv[threadIdx.y][field_id]=non_zero_bvs[field_id]+pos*RTE_TABLE_NON_ZERO_BV_BS;
-            }
-        }
-        __syncwarp();
-    }
 
 found_bv:
 
