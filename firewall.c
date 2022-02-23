@@ -43,6 +43,7 @@ extern "C" {
 
 #define RTE_LOGTYPE_APP RTE_LOGTYPE_USER1
 //#define MEASURE_TIME
+//#define DO_NOT_TRANSMIT_TO_TAP
 
 typedef struct {
     void *table;
@@ -127,7 +128,9 @@ static int firewall(void *arg) {
         cudaHostAlloc((void **) &pkts_data, sizeof(uint8_t*)*BURST_SIZE, cudaHostAllocMapped|cudaHostAllocWriteCombined);
         cudaHostAlloc((void **) &lookup_hit_vec, sizeof(uint8_t*)*BURST_SIZE, cudaHostAllocMapped);
 
+#ifndef DO_NOT_TRANSMIT_TO_TAP
         struct rte_mbuf *bufs_tx[BURST_SIZE];
+#endif
 
         cudaStream_t stream;
         cudaStreamCreate(&stream);
@@ -154,6 +157,27 @@ static int firewall(void *arg) {
             i=0;
             j=0;
 
+#ifdef DO_NOT_TRANSMIT_TO_TAP
+            for(; i<nb_rx; ++i) {
+                if(unlikely(!lookup_hit_vec[i])) {
+                    ++j;
+                    ++(stats->pkts_lookup_miss);
+                    continue;
+                }
+
+                if(*(actions[i])==RULE_DROP)
+                    continue;
+
+                ++j;
+            }
+
+            rte_pktmbuf_free_bulk(bufs_rx, nb_rx);
+
+            stats->pkts_in+=nb_rx;
+            stats->pkts_out+=j;
+            stats->pkts_accepted+=j;
+            stats->pkts_dropped+=nb_rx-j;
+#else
             for(; i<nb_rx; ++i) {
                 if(unlikely(!lookup_hit_vec[i])) {
                     bufs_tx[j++]=bufs_rx[i];
@@ -180,6 +204,7 @@ static int firewall(void *arg) {
             stats->pkts_out+=nb_tx;
             stats->pkts_accepted+=j;
             stats->pkts_dropped+=nb_rx-j;
+#endif
         }
     } else {
         struct rte_mbuf *bufs_rx[BURST_SIZE];
