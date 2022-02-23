@@ -29,7 +29,7 @@ extern "C" {
 #include <rte_metrics.h>
 #include <rte_bitrate.h>
 #include <rte_latencystats.h>
-
+#include <sys/time.h>
 #include <cuda_runtime.h>
 
 #include "rte_bv_classifier.h"
@@ -39,6 +39,7 @@ extern "C" {
 #include "stats.h"
 
 #define RTE_LOGTYPE_APP RTE_LOGTYPE_USER1
+#define DO_NOT_TRANSMIT_TO_TAP
 
 struct rte_pktmbuf_extmem ext_mem;
 struct rte_mempool *mpool_payload;
@@ -99,10 +100,32 @@ void print_stats(__rte_unused int e) {
 
 void tx_callback(struct rte_mbuf **pkts, uint16_t nb_rx, uint8_t *lookup_hit_vec, void **actions_r, void *p_r) {
     uint8_t **actions=(uint8_t **) actions_r;
-    callback_payload_t *p=(callback_payload_t *) p_r;
     uint16_t i=0, j=0;
-    struct rte_mbuf *bufs_tx[BURST_SIZE];
 
+#ifdef DO_NOT_TRANSMIT_TO_TAP
+    for(; i<nb_rx; ++i) {
+        if(unlikely(!lookup_hit_vec[i])) {
+            ++j;
+            port_stats->pkts_lookup_miss++;
+            continue;
+        }
+
+        if(*(actions[i])==RULE_DROP) {
+            continue;
+        }
+
+        ++j;
+    }
+
+    rte_pktmbuf_free_bulk(pkts, nb_rx);
+
+    port_stats->pkts_in+=nb_rx;
+    port_stats->pkts_out+=j;
+    port_stats->pkts_accepted+=j;
+    port_stats->pkts_dropped+=nb_rx-j;
+#else
+    callback_payload_t *p=(callback_payload_t *) p_r;
+    struct rte_mbuf *bufs_tx[BURST_SIZE];
     for(; i<nb_rx; ++i) {
         if(unlikely(!lookup_hit_vec[i])) {
             bufs_tx[j++]=pkts[i];
@@ -128,6 +151,7 @@ void tx_callback(struct rte_mbuf **pkts, uint16_t nb_rx, uint8_t *lookup_hit_vec
     port_stats->pkts_out+=nb_tx;
     port_stats->pkts_accepted+=j;
     port_stats->pkts_dropped+=nb_rx-j;
+#endif
 }
 
 int trunk_rx(void *arg) {
