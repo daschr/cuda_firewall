@@ -47,6 +47,7 @@ extern "C" {
 #define RTE_LOGTYPE_APP RTE_LOGTYPE_USER1
 
 //#define MEASURE_TIME
+#define DO_NOT_TRANSMIT_TO_TAP
 
 typedef struct {
     void *table;
@@ -61,7 +62,6 @@ void *table;
 ruleset_t ruleset;
 uint16_t tap_port_id, trunk_port_id;
 unsigned long timestamp;
-uint32_t fdefs_offsets[5];
 
 stats_t *old_port_stats=NULL, *port_stats=NULL;
 
@@ -102,15 +102,15 @@ void print_stats(__rte_unused int e) {
     double ts_d=(double) (new_ts-timestamp)/1000000.0;
 
 #define PPS(X, P) (((double) (port_stats[P].X-old_port_stats[P].X))/ts_d)
-    printf("[trunk] pkts_in: %.2lfpps pkts_out: %.2lfpps pkts_dropped: %.2lfpps pkts_accepted: %.2lfpps\n",
-           PPS(pkts_in, 0), PPS(pkts_out, 0), PPS(pkts_dropped, 0), PPS(pkts_accepted, 0));
+    printf("[trunk] pkts_in: %.2lfpps pkts_out: %.2lfpps pkts_dropped: %.2lfpps pkts_accepted: %.2lfpps pkts_lookup_miss: %.2lfpps\n",
+           PPS(pkts_in, 0), PPS(pkts_out, 0), PPS(pkts_dropped, 0), PPS(pkts_accepted, 0), PPS(pkts_lookup_miss, 0));
     old_port_stats[0]=port_stats[0];
 
-    printf("[fw-tap] pkts_in: %.2lfpps pkts_out: %.2lfpps pkts_dropped: %.2lfpps pkts_accepted: %.2lfpps\n",
-           PPS(pkts_in, 1), PPS(pkts_out, 1), PPS(pkts_dropped, 1), PPS(pkts_accepted, 1));
+    printf("[fw-tap] pkts_in: %.2lfpps pkts_out: %.2lfpps pkts_dropped: %.2lfpps pkts_accepted: %.2lfpps pkts_lookup_miss: %.2lfpps\n",
+           PPS(pkts_in, 1), PPS(pkts_out, 1), PPS(pkts_dropped, 1), PPS(pkts_accepted, 1), PPS(pkts_lookup_miss, 1));
     old_port_stats[1]=port_stats[1];
 #undef PPS
-	timestamp=new_ts;
+    timestamp=new_ts;
 }
 
 static int firewall(void *arg) {
@@ -118,7 +118,7 @@ static int firewall(void *arg) {
 
     const uint16_t queue_id=rte_lcore_id()>>1;
 
-    stats_t *stats=((stats_t *) conf->stats)+((rte_lcore_id()&1)^1);
+    stats_t *stats=conf->stats+((rte_lcore_id()&1)^1);
 
 #ifdef MEASURE_TIME
     struct timeval t1,t2;
@@ -130,17 +130,16 @@ static int firewall(void *arg) {
         uint8_t *actions[BURST_SIZE];
 
         struct rte_mbuf *bufs_rx[BURST_SIZE];
-        struct rte_mbuf *bufs_tx[BURST_SIZE];
 
-        cudaStream_t stream;
-        cudaStreamCreate(&stream);
+#ifndef DO_NOT_TRANSMIT_TO_TAP
+        struct rte_mbuf *bufs_tx[BURST_SIZE];
+#endif
 
         int16_t i,j;
 
         lookup_hit_mask=0;
         for(; likely(running); lookup_hit_mask=0) {
             const uint16_t nb_rx = rte_eth_rx_burst(trunk_port_id, queue_id, bufs_rx, BURST_SIZE);
-
             if(unlikely(nb_rx==0))
                 continue;
 
@@ -160,7 +159,27 @@ static int firewall(void *arg) {
             i=0;
             j=0;
 
-            //printf("lookup_hit_mask: %lX\n", lookup_hit_mask);
+#ifdef DO_NOT_TRANSMIT_TO_TAP
+            for(; i<nb_rx; ++i) {
+                if(unlikely(!((lookup_hit_mask>>i)&1))) {
+                    stats->pkts_lookup_miss++;
+                    continue;
+                }
+
+                if(*(actions[i])==RULE_DROP)
+                    continue;
+
+                ++j;
+            }
+
+            rte_pktmbuf_free_bulk(bufs_rx, nb_rx);
+
+            stats->pkts_in+=nb_rx;
+            stats->pkts_out+=j;
+            stats->pkts_accepted+=j;
+            stats->pkts_dropped+=nb_rx-j;
+
+#else
             for(; i<nb_rx; ++i) {
                 if(unlikely(!((lookup_hit_mask>>i)&1)))
                     continue;
@@ -184,11 +203,13 @@ static int firewall(void *arg) {
                 for(uint16_t b=nb_tx; b<nb_rx; ++b)
                     rte_pktmbuf_free(bufs_rx[b]);
             }
+#endif
         }
     } else {
         struct rte_mbuf *bufs_rx[BURST_SIZE];
 
         while(likely(running)) {
+
             const uint16_t nb_rx = rte_eth_rx_burst(tap_port_id, queue_id, bufs_rx, BURST_SIZE);
 
             if(unlikely(nb_rx==0))
@@ -197,12 +218,12 @@ static int firewall(void *arg) {
             const uint16_t nb_tx = rte_eth_tx_burst(trunk_port_id, queue_id, bufs_rx, nb_rx);
 
             stats->pkts_in+=nb_rx;
-            stats->pkts_out+=nb_tx;
 
             if(unlikely(nb_tx<nb_rx)) {
                 for(uint16_t b=nb_tx; b<nb_rx; ++b)
                     rte_pktmbuf_free(bufs_rx[b]);
             }
+            stats->pkts_out+=nb_tx;
         }
     }
 
@@ -308,11 +329,13 @@ int main(int ac, char *as[]) {
     table_params.n_rules=100000;
     table_params.n_rule_fields=5;
 
-    fdefs_offsets[0]=offsetof(struct rte_ipv4_hdr, next_proto_id);
-    fdefs_offsets[1]=offsetof(struct rte_ipv4_hdr, src_addr);
-    fdefs_offsets[2]=offsetof(struct rte_ipv4_hdr, dst_addr);
-    fdefs_offsets[3]=sizeof(struct rte_ipv4_hdr)+offsetof(struct rte_tcp_hdr, src_port);
-    fdefs_offsets[4]=sizeof(struct rte_ipv4_hdr)+offsetof(struct rte_tcp_hdr, dst_port);
+    uint32_t fdefs_offsets[5]= {
+        offsetof(struct rte_ipv4_hdr, next_proto_id),
+        offsetof(struct rte_ipv4_hdr, src_addr),
+        offsetof(struct rte_ipv4_hdr, dst_addr),
+        sizeof(struct rte_ipv4_hdr)+offsetof(struct rte_tcp_hdr, src_port),
+        sizeof(struct rte_ipv4_hdr)+offsetof(struct rte_tcp_hdr, dst_port)
+    };
 
     uint8_t fdefs_sizes[5]= {1,4,4,2,2};
 
@@ -374,7 +397,6 @@ int main(int ac, char *as[]) {
     rte_eal_remote_launch(firewall, &fw_conf, coreid);
 
     firewall(&fw_conf);
-
     rte_eal_mp_wait_lcore();
 
     rte_table_acl_ops.f_free(table);
@@ -387,7 +409,8 @@ int main(int ac, char *as[]) {
 err:
     free_ruleset(&ruleset);
     rte_eal_cleanup();
-    free(port_stats);
+    rte_free(port_stats);
+    rte_free(old_port_stats);
     return EXIT_FAILURE;
 }
 
