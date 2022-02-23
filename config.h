@@ -1,8 +1,6 @@
 #ifndef __INCLUDE_CONFIG
 #define __INCLUDE_CONFIG
 
-#include <rte_kni.h>
-
 #define DEFAULT_NB_MBUF 16384
 #define DEFAULT_MTU 1500
 #define DEFAULT_MBUF_DATAROOM 2048
