@@ -130,7 +130,7 @@ static int firewall(void *arg) {
         uint8_t *lookup_hit_vec;
         cudaHostAlloc((void **) &lookup_hit_vec, sizeof(uint8_t*)*BURST_SIZE, cudaHostAllocMapped);
 
-#ifdef DO_NOT_TRANSMIT_TO_TAP
+#ifndef DO_NOT_TRANSMIT_TO_TAP
         struct rte_mbuf *bufs_tx[BURST_SIZE];
 #endif
 
