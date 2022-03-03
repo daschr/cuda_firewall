@@ -47,7 +47,7 @@ extern "C" {
 #define RTE_LOGTYPE_APP RTE_LOGTYPE_USER1
 
 //#define MEASURE_TIME
-//#define DO_NOT_TRANSMIT_TO_TAP
+#define DO_NOT_TRANSMIT_TO_TAP
 
 typedef struct {
     void *table;
@@ -359,7 +359,8 @@ int main(int ac, char *as[]) {
     if(table==NULL)
         goto err;
 
-    rte_table_acl_ops.f_add_bulk(table, (void **) ruleset.rules, (void **) actions, ruleset.num_rules, key_found, (void **) entry_handles);
+    if(rte_table_acl_ops.f_add_bulk(table, (void **) ruleset.rules, (void **) actions, ruleset.num_rules, key_found, (void **) entry_handles))
+			goto err;
     /*
     #define FIELD(I, X, B) (ruleset.rules[I]->field_value[X].value.u##B)
     #define MASK(I, X, B) (ruleset.rules[I]->field_value[X].mask_range.u##B)
@@ -408,9 +409,9 @@ int main(int ac, char *as[]) {
 
 err:
     free_ruleset(&ruleset);
-    rte_eal_cleanup();
     rte_free(port_stats);
     rte_free(old_port_stats);
+    rte_eal_cleanup();
     return EXIT_FAILURE;
 }
 
