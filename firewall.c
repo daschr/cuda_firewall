@@ -47,7 +47,7 @@ extern "C" {
 #define RTE_LOGTYPE_APP RTE_LOGTYPE_USER1
 
 //#define MEASURE_TIME
-#define DO_NOT_TRANSMIT_TO_TAP
+//#define DO_NOT_TRANSMIT_TO_TAP
 
 typedef struct {
     void *table;
@@ -111,6 +111,7 @@ void print_stats(__rte_unused int e) {
     old_port_stats[1]=port_stats[1];
 #undef PPS
     timestamp=new_ts;
+
 }
 
 static int firewall(void *arg) {
@@ -198,7 +199,6 @@ static int firewall(void *arg) {
             stats->pkts_out+=nb_tx;
             stats->pkts_accepted+=j;
             stats->pkts_dropped+=nb_rx-j;
-
             if(unlikely(nb_tx<nb_rx)) {
                 for(uint16_t b=nb_tx; b<nb_rx; ++b)
                     rte_pktmbuf_free(bufs_rx[b]);

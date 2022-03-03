@@ -9,6 +9,6 @@ typedef struct {
 	size_t pkts_dropped;
 	size_t pkts_accepted;
 	size_t pkts_lookup_miss;
-} stats_t __rte_cache_aligned;
+} stats_t;
 
 #endif
