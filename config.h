@@ -9,7 +9,7 @@
 #define DEFAULT_NB_RX_DESC 4096
 #define DEFAULT_NB_TX_DESC 4096
 
-#define MAX_NUMBER_RULES 60000U
+#define MAX_NUMBER_RULES 100001U
 
 #define BURST_SIZE 64
 
@@ -17,5 +17,5 @@
 
 #define RTE_TABLE_VAL_DROP 1
 
-#define DEFAULT_NB_QUEUES 2
+#define DEFAULT_NB_QUEUES 1
 #endif

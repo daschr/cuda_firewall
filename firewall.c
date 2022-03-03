@@ -326,7 +326,7 @@ int main(int ac, char *as[]) {
 
     struct rte_table_acl_params table_params;
     table_params.name="2tuple";
-    table_params.n_rules=100000;
+    table_params.n_rules=100001;
     table_params.n_rule_fields=5;
 
     uint32_t fdefs_offsets[5]= {
