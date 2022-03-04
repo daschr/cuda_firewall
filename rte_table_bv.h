@@ -15,7 +15,7 @@ extern "C" {
 #define RTE_TABLE_BV_MAX_RANGES ((size_t) (RTE_BV_MARKERS_MAX_ENTRIES>>1))
 #define RTE_TABLE_BV_BS	((size_t) (RTE_TABLE_BV_MAX_RANGES>>6)+1)
 #define RTE_TABLE_NON_ZERO_BV_BS ((size_t) (((RTE_TABLE_BV_MAX_RANGES>>6)+1)>>6)+1)
-#define RTE_TABLE_BV_MAX_PKTS 512
+#define RTE_TABLE_BV_MAX_PKTS 1024
 #define RTE_TABLE_BV_MAX_FIELDS 24
 
 enum {
