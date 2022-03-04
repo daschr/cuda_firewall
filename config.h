@@ -8,7 +8,7 @@
 #define DEFAULT_NB_TX_DESC 2048
 #define DEFAULT_NB_QUEUES 1
 
-#define BURST_SIZE 1024
+#define BURST_SIZE 64
 
 #define GPU_PAGE_SIZE (1U<<16)
 

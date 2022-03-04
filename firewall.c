@@ -39,7 +39,7 @@ extern "C" {
 #include "stats.h"
 
 #define RTE_LOGTYPE_APP RTE_LOGTYPE_USER1
-#define DO_NOT_TRANSMIT_TO_TAP
+//#define DO_NOT_TRANSMIT_TO_TAP
 
 struct rte_pktmbuf_extmem ext_mem;
 struct rte_mempool *mpool_payload;
