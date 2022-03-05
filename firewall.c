@@ -47,7 +47,7 @@ extern "C" {
 #define RTE_LOGTYPE_APP RTE_LOGTYPE_USER1
 
 //#define MEASURE_TIME
-#define DO_NOT_TRANSMIT_TO_TAP
+//#define DO_NOT_TRANSMIT_TO_TAP
 
 typedef struct {
     void *table;
@@ -360,7 +360,7 @@ int main(int ac, char *as[]) {
         goto err;
 
     if(rte_table_acl_ops.f_add_bulk(table, (void **) ruleset.rules, (void **) actions, ruleset.num_rules, key_found, (void **) entry_handles))
-			goto err;
+        goto err;
     /*
     #define FIELD(I, X, B) (ruleset.rules[I]->field_value[X].value.u##B)
     #define MASK(I, X, B) (ruleset.rules[I]->field_value[X].mask_range.u##B)
@@ -397,6 +397,7 @@ int main(int ac, char *as[]) {
     coreid=rte_get_next_lcore(rte_get_main_lcore(), 1, 1);
     rte_eal_remote_launch(firewall, &fw_conf, coreid);
 
+    printf("FIREWALL READY\n");
     firewall(&fw_conf);
     rte_eal_mp_wait_lcore();
 
