@@ -372,7 +372,7 @@ int main(int ac, char *as[]) {
 
     coreid=rte_get_next_lcore(rte_get_main_lcore(), 1, 1);
     rte_eal_remote_launch(firewall, &fw_conf, coreid);
-
+    printf("FIREWALL READY\n");
     firewall(&fw_conf);
 
     rte_eal_mp_wait_lcore();
