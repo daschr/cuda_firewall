@@ -159,7 +159,7 @@ static int firewall(void *arg) {
 #ifdef DO_NOT_TRANSMIT_TO_TAP
             for(; i<nb_rx; ++i) {
                 if(unlikely(!lookup_hit_vec[i])) {
-					++j;
+                    ++j;
                     ++(stats->pkts_lookup_miss);
                     continue;
                 }
@@ -167,10 +167,10 @@ static int firewall(void *arg) {
                 if(*(actions[i])==RULE_DROP)
                     continue;
 
-				++j;
+                ++j;
             }
 
-			rte_pktmbuf_free_bulk(bufs_rx, nb_rx);
+            rte_pktmbuf_free_bulk(bufs_rx, nb_rx);
 
             stats->pkts_in+=nb_rx;
             stats->pkts_out+=j;
@@ -375,6 +375,7 @@ int main(int ac, char *as[]) {
     coreid=rte_get_next_lcore(rte_get_main_lcore(), 1, 1);
     rte_eal_remote_launch(firewall, &fw_conf, coreid);
 
+    printf("FIREWALL READY\n");
     firewall(&fw_conf);
 
     rte_eal_mp_wait_lcore();
