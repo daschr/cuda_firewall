@@ -345,6 +345,7 @@ int main(int ac, char *as[]) {
     coreid=rte_get_next_lcore(coreid, 1, 1);
     rte_eal_remote_launch(trunk_rx, (void *) classifier, coreid);
 
+    printf("FIREWALL READY\n");
     trunk_tx(&trunk_tx_param);
 
     rte_eal_mp_wait_lcore();
