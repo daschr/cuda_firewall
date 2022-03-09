@@ -444,9 +444,9 @@ __global__ void bv_search(	uint32_t *__restrict__ *__restrict__ ranges_from,
             if((__ffs(l&r)-1)==threadIdx.x) {
                 if(!(lres&rres))
                     goto found_bv;
-
+			
                 const long pos=(offset<<comp_level)|leu_offset(lres&rres, field_size);
-                bv[threadIdx.y][field_id]=bvs[field_id]+pos*RTE_TABLE_BV_BS;
+				bv[threadIdx.y][field_id]=bvs[field_id]+pos*RTE_TABLE_BV_BS;
                 non_zero_bv[threadIdx.y][field_id]=non_zero_bvs[field_id]+pos*RTE_TABLE_NON_ZERO_BV_BS;
             }
             __syncwarp();
@@ -482,10 +482,10 @@ found_bv:
 #undef field_id
 
     if(__ballot_sync(UINT32_MAX, threadIdx.x<num_fields&&!bv[threadIdx.y][threadIdx.x])) {
-        if(!threadIdx.x)
+        if(!threadIdx.x){
             lookup_hit_vec[pkt_id]=0;
-
-        return;
+		}	
+		return;
     }
 
     // all bitvectors found, now getting highest-priority rule
@@ -494,7 +494,7 @@ found_bv:
     uint32_t in_loop=__ballot_sync(UINT32_MAX, nz_bv_b<RTE_TABLE_NON_ZERO_BV_BS);
 
     while(nz_bv_b<RTE_TABLE_NON_ZERO_BV_BS) {
-        uint64_t x=non_zero_bv[threadIdx.y][0][nz_bv_b];
+		uint64_t x=non_zero_bv[threadIdx.y][0][nz_bv_b];
         for(int field_id=1; field_id<num_fields; ++field_id)
             x&=non_zero_bv[threadIdx.y][field_id][nz_bv_b];
 
@@ -508,18 +508,18 @@ found_bv:
                 y&=bv[threadIdx.y][field_id][p];
 
             if(y)
-                break;
+				break;
 
             x>>=pos;
             x<<=pos;
         }
 
-// __syncwarp(in_loop); //TODO maybe remove
+		__syncwarp(in_loop); //TODO maybe remove
         const uint32_t tm=__ballot_sync(in_loop, __ffsll(y));
         if(tm) {
             if((__ffs(tm)-1)==threadIdx.x) {
-                matched_entries[pkt_id]=(void *) &entries[entry_size*((nz_bv_b<<6)+__ffsll(y)-1LU)];
-                lookup_hit_vec[pkt_id]=1;
+				matched_entries[pkt_id]=(void *) &entries[entry_size*((nz_bv_b<<12)+((pos-1)<<6)+(__ffsll(y))-1LU)];
+				lookup_hit_vec[pkt_id]=1;
             }
             return;
         }
@@ -528,8 +528,9 @@ found_bv:
         in_loop=__ballot_sync(in_loop, nz_bv_b<RTE_TABLE_NON_ZERO_BV_BS);
     }
 
-    if(!threadIdx.x)
-        lookup_hit_vec[pkt_id]=0;
+    if(!threadIdx.x){
+		lookup_hit_vec[pkt_id]=0;
+	}
 }
 
 
