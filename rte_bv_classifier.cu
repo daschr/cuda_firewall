@@ -487,7 +487,7 @@ found_bv:
         const uint32_t tm=__ballot_sync(in_loop, __ffsll(y));
         if(tm) {
             if((__ffs(tm)-1)==threadIdx.x) {
-                matched_entries[pkt_id]=(void *) &entries[entry_size*((nz_bv_b<<6)+__ffsll(y)-1LU)];
+                matched_entries[pkt_id]=(void *) &entries[entry_size*((nz_bv_b<<12)+((pos-1)<<6)+__ffsll(y)-1LU)];
                 lookup_hit_vec[pkt_id]=1;
             }
             return;
