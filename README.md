@@ -8,16 +8,26 @@ Implementing a Firewall using dpdk and CUDA
 - [x] simple l2 forward of incoming packet from tap to trunk port
 - [ ] switch from tap to kni
 - [ ] add better stats collection to firewall
-- [ ] improving speed of bitvector search
+- [x] improving speed of bitvector search
 - [ ] misc. refactoring
 
-# current stats*
+# current stats
 
+## Line rate*
 | line rate | 100Mbits/s | 500 Mbits/s | 1Gbit/s | 5 Gbit/s | 10 Gbit/s | 20 Gbit/s | 40 Gbit/s|
 |-----------|:----------:|:-----------:|:-------:|:--------:|:---------:|:---------:|:--------:|
 ||**reached**|**reached**|**reached**|**reached**|**reached**|*pending*|*pending*|
 
- <font size="1"> *tested using iperf3 and two Mellanox ConnectX-3 NICs (40GigE)</font> 
+ <font size="1"> *tested using iper3 and two Mellanox ConnectX-3 NICs (40GigE)</font> 
+
+
+## Packet rate**
+
+| packet rate | with tap forward | without tap forward |
+|-----------|:----------:|:-----------:|
+||~2.8Mpps|~12.5Mpps|
+
+ <font size="1"> **tested using pktgen-dpdk using the asynchronous execution model (*async* branch) and two Mellanox ConnectX-3 NICs (40GigE)</font> 
 
 # settings
 * use `isolcpus` to isolate at least two adjacent logical cores
