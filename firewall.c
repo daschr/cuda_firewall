@@ -174,7 +174,7 @@ static int firewall(void *arg) {
                 if((lookup_hit_mask>>pos)&1) {
                     if(lookup_hit_vec[pos]){
                         if(*positions_gpu[pos]!=*positions_dpdk[pos]){
-							printf("positions_gpu[%1$lu]=%2$u != %3$u=positions_dpdk[%1$lu]\n", pos, *positions_gpu[pos], *positions_dpdk[pos]);
+							printf("NOT EQUAL: positions_gpu[%1$lu]=%2$u != %3$u=positions_dpdk[%1$lu]\n", pos, *positions_gpu[pos], *positions_dpdk[pos]);
 						}
 					}else{
                     	printf("positions_dpdk[%lu]=%u\n", pos, *positions_dpdk[pos]);
@@ -418,31 +418,11 @@ int main(int ac, char *as[]) {
     key_found=rte_malloc("key_found", sizeof(int)*ruleset.num_rules, sizeof(int));
     entry_handles=rte_malloc("entry_handles", sizeof(uint8_t *)*ruleset.num_rules, sizeof(int8_t *));
 
-    puts("add bulk");
     if(rte_table_acl_ops.f_add_bulk(table_dpdk, (void **) ruleset_acl.rules, (void **) positions, ruleset_acl.num_rules, key_found, (void **) entry_handles))
         goto err;
 
-#define FIELD(I, X, B) (ruleset_acl.rules[I]->field_value[X].value.u##B)
-#define MASK(I, X, B) (ruleset_acl.rules[I]->field_value[X].mask_range.u##B)
-    for(uint32_t i=0; i<ruleset_acl.num_rules; ++i) {
-        printf("key_found: %d entry_handles: %p entry_handles[%u]: %u\n", key_found[i], entry_handles[i], i, *((uint8_t *) entry_handles[i]));
-        printf("%u: %02X-%02X %08X-%08X %08X-%08X %04X-%04X %04X-%04X\n",
-               i,
-               FIELD(i, 0, 8), MASK(i, 0, 8),
-               FIELD(i, 1, 32), MASK(i, 1, 32),
-               FIELD(i, 2, 32), MASK(i, 2, 32),
-               FIELD(i, 3, 16), MASK(i, 3, 16),
-               FIELD(i, 4, 16), MASK(i, 4, 16)
-              );
-    }
-#undef FIELD
-#undef MASK
-
-
     free_ruleset_except_actions(&ruleset);
-    puts("free ruleset_acl");
     acl_free_ruleset_except_actions(&ruleset_acl);
-    puts("done free ruleset_acl");
 
     fw_conf=(firewall_conf_t) {
         .table_gpu=table_gpu, .table_dpdk=table_dpdk, .position_data=position_data, .tap_macaddr=&tap_macaddr, .stats=port_stats
