@@ -16,6 +16,8 @@ Implementing a Firewall using dpdk and CUDA
 
 # current stats
 
+![measurement](https://github.com/daschr/cuda_firewall/blob/main/results_no-forward.png)
+
 ## Line rate*
 | line rate | 100Mbits/s | 500 Mbits/s | 1Gbit/s | 5 Gbit/s | 10 Gbit/s | 20 Gbit/s | 40 Gbit/s|
 |-----------|:----------:|:-----------:|:-------:|:--------:|:---------:|:---------:|:--------:|
@@ -36,6 +38,7 @@ Implementing a Firewall using dpdk and CUDA
 * use `isolcpus` to isolate at least two adjacent logical cores
 * force device managed flow steering, f.e. for Mellanox ConnectX-3: `mlx4_core.log_num_mgm_entry_size=-1`
 * example: `GRUB_CMDLINE_LINUX_DEFAULT="quiet isolcpus=2,3 mlx4_core.log_num_mgm_entry_size=-1"`
+
 
 # usage
 
