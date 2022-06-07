@@ -21,7 +21,7 @@ Implementing a Firewall using dpdk and CUDA
 |-----------|:----------:|:-----------:|:-------:|:--------:|:---------:|:---------:|:--------:|
 ||**reached**|**reached**|**reached**|**reached**|**reached**|*pending*|*pending*|
 
- <font size="1"> *tested using iper3 and two Mellanox ConnectX-3 NICs (40GigE)</font> 
+ <font size="1"> *tested using iperf3 and two Mellanox ConnectX-3 NICs (40GigE)</font> 
 
 
 ## Packet rate**
